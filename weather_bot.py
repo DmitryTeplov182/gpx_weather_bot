@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta
 
 import pytz
+import gpxpy
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
@@ -20,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from weather_dashboard import get_timezone
+from weather_dashboard import detect_timezone_from_gpx, get_timezone
 
 load_dotenv()
 
@@ -44,7 +45,6 @@ KOMOOT_LINK_PATTERN = re.compile(r"(https?://)?(www\.)?komoot\.[^/]+/tour/(\d+)"
 CACHE_DIR = "cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 MAX_GPX_SIZE_BYTES = 5 * 1024 * 1024  # 5MB
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -88,10 +88,8 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Failed to download GPX file.")
             return ASK_KOMOOT_LINK
 
-        # Валидация содержимого GPX после загрузки
+        # GPX content validation
         try:
-            import gpxpy
-
             with open(gpx_path, "r", encoding="utf-8") as f:
                 gpx = gpxpy.parse(f)
             has_points = any(
@@ -280,7 +278,6 @@ async def ask_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         speed = float(m.group(1))
 
     context.user_data["speed"] = speed
-    await update.message.reply_text("🌤️ Generating weather dashboard...", reply_markup=ReplyKeyboardRemove())
     return await process_gpx(update, context)
 
 
@@ -320,6 +317,22 @@ async def process_gpx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif not os.path.exists(gpx_path):
         await update.message.reply_text("❌ Uploaded GPX file was not found.")
         return ConversationHandler.END
+
+    route_timezone_name = detect_timezone_from_gpx(gpx_path)
+    route_tz = get_timezone(route_timezone_name)
+    timezone_label = getattr(route_tz, "zone", str(route_tz))
+
+    # Ensure selected_datetime is represented in route timezone.
+    if selected_datetime.tzinfo is None:
+        selected_datetime = route_tz.localize(selected_datetime)
+    else:
+        selected_datetime = selected_datetime.astimezone(route_tz)
+    context.user_data["selected_datetime"] = selected_datetime
+
+    await update.message.reply_text(
+        f"🌤️ Generating weather dashboard (Time Zone {timezone_label})...",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
     output_path = os.path.join(CACHE_DIR, f"dashboard_{tour_id}_{int(selected_datetime.timestamp())}.png")
 

@@ -49,6 +49,16 @@ def detect_timezone_from_points(points):
         print(f"⚠️ Failed to detect timezone by coordinate: {e}")
         return None
 
+
+def detect_timezone_from_gpx(gpx_file):
+    """Detect IANA timezone directly from GPX file."""
+    try:
+        points = get_route_points_with_time(gpx_file)
+        return detect_timezone_from_points(points)
+    except Exception as e:
+        print(f"⚠️ Failed to detect timezone from GPX: {e}")
+        return None
+
 def get_route_points_with_time(gpx_file):
     """Получает точки маршрута с временными метками"""
     with open(gpx_file, 'r', encoding='utf-8') as f:
@@ -290,7 +300,13 @@ def get_weather_data_for_route(route_points):
     
     return weather_data
 
-def create_weather_dashboard(route_points, weather_data, output_path="weather_dashboard.png", route_length_km=None):
+def create_weather_dashboard(
+    route_points,
+    weather_data,
+    output_path="weather_dashboard.png",
+    route_length_km=None,
+    timezone_name=None,
+):
     """Создает дашборд с графиками погоды в стиле Epic Ride Weather"""
     
     # Настройка стиля matplotlib для светлой темы
@@ -337,9 +353,11 @@ def create_weather_dashboard(route_points, weather_data, output_path="weather_da
     
     times = [w['time'] for w in weather_data_clean]
     distances = [w['distance_km'] for w in weather_data_clean]
-    # Matplotlib по умолчанию форматирует даты в UTC.
-    # Явно фиксируем timezone для осей времени, чтобы на графиках было локальное время маршрута.
-    plot_tz = times[0].tzinfo if times and getattr(times[0], 'tzinfo', None) else get_timezone()
+    # Use timezone detected from GPX as a single source of truth for chart X axes.
+    # Fallback to first point tzinfo, then env-based timezone.
+    plot_tz = get_timezone(timezone_name)
+    if not timezone_name and times and getattr(times[0], "tzinfo", None):
+        plot_tz = times[0].tzinfo
     
     # Заголовок дашборда убран
     
@@ -704,7 +722,13 @@ def main():
     route_length_km = total_distance / 1000
     
     # Создаем дашборд
-    success = create_weather_dashboard(route_points, weather_data, args.output, route_length_km)
+    success = create_weather_dashboard(
+        route_points,
+        weather_data,
+        args.output,
+        route_length_km,
+        detected_timezone,
+    )
     
     if success:
         print("\n🎉 Done! Weather dashboard created.")
