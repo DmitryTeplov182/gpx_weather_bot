@@ -1,0 +1,23 @@
+services:
+  announce-bot:
+    image: ${IMAGE_NAME:-announce-bot:local}
+    build: .
+    container_name: announce-bot
+    command: ["python3", "announce_bot.py"]
+    env_file:
+      - .env_announce
+    volumes:
+      # Монтируем весь проект, чтобы изменения кода/конфигов применялись без пересборки
+      - ./:/app
+    restart: always
+
+  weather-bot:
+    image: ${IMAGE_NAME:-announce-bot:local}
+    build: .
+    container_name: weather-bot
+    command: ["python3", "weather_bot.py"]
+    env_file:
+      - .env_weather
+    volumes:
+      - ./:/app
+    restart: always

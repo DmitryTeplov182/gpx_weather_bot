@@ -1,0 +1,39 @@
+{
+  "ready_routes": [
+    {
+      "name": "Руменка - Футог - Яма(От Бульвара Европы)",
+      "komoot_link": "https://www.komoot.com/tour/2526993761",
+      "start_point": "Макси у Бульвара Европы",
+      "start_point_link": "https://maps.app.goo.gl/3ZbDZM9VVRBDDddp8?g_st=ipc",
+      "comment": "Темповая тренировка, держим ровный ход."
+    },
+    {
+      "name": "Frushka Lite CCW(от Флагов)",
+      "komoot_link": "https://www.komoot.com/tour/2396106518",
+      "start_point": "Флаги",
+      "start_point_link": "https://maps.app.goo.gl/j95ME2cuzX8k9hnj7",
+      "comment": "Легкий горный маршрут по Фрушке."
+    },
+    {
+      "name": "Буковац(От Флагов)",
+      "komoot_link": "https://www.komoot.com/tour/2070100198",
+      "start_point": "Флаги",
+      "start_point_link": "https://maps.app.goo.gl/j95ME2cuzX8k9hnj7",
+      "comment": "Классический заезд на набор."
+    },
+    {
+      "name": "Kurac extended(От Коферайда)",
+      "komoot_link": "https://www.komoot.com/tour/2152470452",
+      "start_point": "koferajd",
+      "start_point_link": "https://maps.app.goo.gl/iTBcRqjvhJ9DYvRK7",
+      "comment": "Длинный маршрут, рассчитывайте силы."
+    },
+    {
+      "name": "Раковац-Венац(От Флагов)",
+      "komoot_link": "https://www.komoot.com/tour/2489858653",
+      "start_point": "Флаги",
+      "start_point_link": "https://maps.app.goo.gl/j95ME2cuzX8k9hnj7",
+      "comment": "Работа в подъем, без гонки."
+    }
+  ]
+}

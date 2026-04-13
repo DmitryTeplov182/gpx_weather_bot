@@ -1,0 +1,24 @@
+{
+  "routes": [
+    {
+      "name": "Руменка - Футог - Яма(От Бульвара Европы)",
+      "link": "https://www.komoot.com/tour/2526993761"
+    },
+    {
+      "name": "Frushka Lite CCW(от Флагов)",
+      "link": "https://www.komoot.com/tour/2396106518"
+    },
+    {
+      "name": "Буковац(От Флагов)",
+      "link": "https://www.komoot.com/tour/2070100198"
+    },
+    {
+      "name": "Kurac extended(От Коферайда)",
+      "link": "https://www.komoot.com/tour/2152470452"
+    },
+    {
+      "name": "Раковац-Венац(От Флагов)",
+      "link": "https://www.komoot.com/tour/2489858653"
+    }
+  ]
+}

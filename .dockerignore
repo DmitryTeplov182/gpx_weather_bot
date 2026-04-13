@@ -1,0 +1,30 @@
+# Кэш и временные файлы
+cache/
+*.gpx
+logs/
+
+# Конфигурационные файлы
+start_locations.json
+.env
+.env_announce
+.env_weather
+compose.yml
+compose.yml.demo
+
+# Python
+__pycache__/
+*.pyc
+venv/
+**/venv/
+
+# Legacy nested projects
+weather_bot/
+**/.git/
+
+# Git
+.git/
+
+# Документация (не нужна в образе)
+README.md
+LICENSE
+.env

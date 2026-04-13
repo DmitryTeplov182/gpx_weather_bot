@@ -1,0 +1,15 @@
+python-telegram-bot==22.3
+gpxpy==1.6.2
+python-dotenv==1.1.1
+komootgpx==1.4.2
+pytz
+Pillow
+requests
+openmeteo-requests
+requests-cache
+retry-requests
+numpy
+pandas
+matplotlib
+contextily
+timezonefinder
