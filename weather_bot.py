@@ -22,6 +22,16 @@ from telegram.ext import (
 )
 
 from weather_dashboard import detect_timezone_from_gpx, get_timezone
+from favorites_db import (
+    count_favorites,
+    create_favorite,
+    delete_favorite,
+    get_favorite_by_id,
+    init_db,
+    list_favorites,
+    mark_favorite_used,
+    rename_favorite,
+)
 
 load_dotenv()
 
@@ -31,8 +41,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ASK_KOMOOT_LINK, ASK_DATE, ASK_TIME, ASK_SPEED = range(4)
+ASK_KOMOOT_LINK, ASK_DATE, ASK_TIME, ASK_SPEED, ASK_FAVORITE_NAME, SELECT_FAVORITE, ASK_RENAME_FAVORITE = range(7)
 RESTART_BUTTON = "Restart"
+FAVORITES_BUTTON = "⭐ Favorites"
+SAVE_FAVORITE_BUTTON = "⭐ Save to Favorites"
+DELETE_FAVORITE_BUTTON = "🗑 Delete Favorite"
+RENAME_FAVORITE_BUTTON = "✏️ Rename Favorite"
+MAX_FAVORITES_PER_USER = 10
 
 # Для отдельного погодного бота можно задать отдельный токен:
 # WEATHER_TELEGRAM_TOKEN=...
@@ -46,6 +61,13 @@ CACHE_DIR = "cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 MAX_GPX_SIZE_BYTES = 5 * 1024 * 1024  # 5MB
 
+
+def main_keyboard(include_save: bool = False) -> ReplyKeyboardMarkup:
+    rows = [[RESTART_BUTTON, FAVORITES_BUTTON]]
+    if include_save:
+        rows.append([SAVE_FAVORITE_BUTTON])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(
@@ -54,7 +76,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "or upload a GPX route file.\n"
         "I will generate a weather dashboard.",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardMarkup([[RESTART_BUTTON]], resize_keyboard=True),
+        reply_markup=main_keyboard(),
     )
     return ASK_KOMOOT_LINK
 
@@ -63,6 +85,20 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if text == RESTART_BUTTON:
         return await start(update, context)
+    if text == FAVORITES_BUTTON:
+        return await show_favorites(update, context)
+    if text == SAVE_FAVORITE_BUTTON:
+        if not context.user_data.get("can_save_favorite") or not context.user_data.get("gpx_path"):
+            await update.message.reply_text(
+                "No generated route to save yet. Build a dashboard first.",
+                reply_markup=main_keyboard(),
+            )
+            return ASK_KOMOOT_LINK
+        await update.message.reply_text(
+            "Send favorite name (1-64 chars):",
+            reply_markup=main_keyboard(include_save=True),
+        )
+        return ASK_FAVORITE_NAME
 
     if update.message.document:
         document = update.message.document
@@ -110,6 +146,8 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["gpx_path"] = gpx_path
         context.user_data["tour_id"] = f"upload_{uuid.uuid4().hex[:8]}"
         context.user_data["komoot_link"] = None
+        context.user_data["source_type"] = "gpx_upload"
+        context.user_data["gpx_filename"] = os.path.basename(gpx_path)
 
         dates = [
             ["📅 Today", "📅 Tomorrow"],
@@ -141,6 +179,8 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["komoot_link"] = text
     context.user_data["tour_id"] = match.group(3)
+    context.user_data["source_type"] = "komoot"
+    context.user_data["gpx_filename"] = None
 
     dates = [
         ["📅 Today", "📅 Tomorrow"],
@@ -153,6 +193,218 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup(dates, one_time_keyboard=True, resize_keyboard=True),
     )
     return ASK_DATE
+
+
+async def show_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Unable to identify user.")
+        return ASK_KOMOOT_LINK
+
+    favorites = list_favorites(user.id)
+    if not favorites:
+        await update.message.reply_text(
+            "Favorites list is empty.",
+            reply_markup=main_keyboard(include_save=bool(context.user_data.get("can_save_favorite"))),
+        )
+        return ASK_KOMOOT_LINK
+
+    context.user_data["favorite_id_map"] = {}
+    keyboard = []
+    for i, fav in enumerate(favorites, start=1):
+        label = f"{i}. {fav['name']}"
+        keyboard.append([label])
+        context.user_data["favorite_id_map"][str(i)] = int(fav["id"])
+    keyboard.append([RENAME_FAVORITE_BUTTON, DELETE_FAVORITE_BUTTON])
+    keyboard.append(["❌ Cancel"])
+    keyboard.append([RESTART_BUTTON])
+
+    await update.message.reply_text(
+        "Choose favorite route or select manage action:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True),
+    )
+    return SELECT_FAVORITE
+
+
+async def handle_favorite_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text == RESTART_BUTTON:
+        return await start(update, context)
+    if text == "❌ Cancel":
+        await update.message.reply_text(
+            "Cancelled.",
+            reply_markup=main_keyboard(include_save=bool(context.user_data.get("can_save_favorite"))),
+        )
+        return ASK_KOMOOT_LINK
+    if text == DELETE_FAVORITE_BUTTON:
+        context.user_data["favorite_manage_action"] = "delete"
+        await update.message.reply_text("Send favorite number to delete.")
+        return SELECT_FAVORITE
+    if text == RENAME_FAVORITE_BUTTON:
+        context.user_data["favorite_manage_action"] = "rename"
+        await update.message.reply_text("Send favorite number to rename.")
+        return SELECT_FAVORITE
+
+    m = re.match(r"^(\d+)\.", text)
+    choice = m.group(1) if m else text
+    fav_id_map = context.user_data.get("favorite_id_map", {})
+    favorite_id = fav_id_map.get(choice)
+    if not favorite_id:
+        await update.message.reply_text("Choose a favorite from the list.")
+        return SELECT_FAVORITE
+
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Unable to identify user.")
+        return ASK_KOMOOT_LINK
+
+    favorite = get_favorite_by_id(user.id, favorite_id)
+    if not favorite:
+        await update.message.reply_text("Favorite route not found.")
+        return ASK_KOMOOT_LINK
+
+    manage_action = context.user_data.get("favorite_manage_action")
+    if manage_action == "delete":
+        deleted = delete_favorite(user.id, favorite_id)
+        context.user_data.pop("favorite_manage_action", None)
+        if deleted:
+            await update.message.reply_text(f"✅ Favorite deleted: {favorite['name']}")
+        else:
+            await update.message.reply_text("Failed to delete favorite.")
+        return await show_favorites(update, context)
+    if manage_action == "rename":
+        context.user_data["favorite_rename_id"] = favorite_id
+        context.user_data["favorite_rename_old_name"] = favorite["name"]
+        context.user_data.pop("favorite_manage_action", None)
+        await update.message.reply_text(
+            f"Send new name for: {favorite['name']}\n(1-64 chars)"
+        )
+        return ASK_RENAME_FAVORITE
+
+    safe_name = f"favorite_{favorite_id}_{uuid.uuid4().hex[:8]}.gpx"
+    gpx_path = os.path.join(CACHE_DIR, safe_name)
+    with open(gpx_path, "wb") as f:
+        f.write(favorite["gpx_blob"])
+
+    context.user_data["gpx_path"] = gpx_path
+    context.user_data["tour_id"] = f"favorite_{favorite_id}_{uuid.uuid4().hex[:8]}"
+    context.user_data["komoot_link"] = favorite["komoot_url"]
+    context.user_data["source_type"] = favorite["source_type"]
+    context.user_data["gpx_filename"] = favorite["gpx_filename"] or safe_name
+    context.user_data["can_save_favorite"] = False
+    mark_favorite_used(favorite_id)
+
+    dates = [
+        ["📅 Today", "📅 Tomorrow"],
+        ["📅 Day After Tomorrow", "📅 In 3 Days"],
+        ["❌ Cancel"],
+        [RESTART_BUTTON],
+    ]
+    await update.message.reply_text(
+        f"✅ Favorite selected: {favorite['name']}\nChoose ride date:",
+        reply_markup=ReplyKeyboardMarkup(dates, one_time_keyboard=True, resize_keyboard=True),
+    )
+    return ASK_DATE
+
+
+async def ask_rename_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text == RESTART_BUTTON:
+        return await start(update, context)
+    if text == "❌ Cancel":
+        await update.message.reply_text("Cancelled.")
+        return await show_favorites(update, context)
+
+    if not (1 <= len(text) <= 64):
+        await update.message.reply_text("Name must be between 1 and 64 chars.")
+        return ASK_RENAME_FAVORITE
+
+    user = update.effective_user
+    favorite_id = context.user_data.get("favorite_rename_id")
+    if not user or not favorite_id:
+        await update.message.reply_text("Rename context is missing.")
+        return ASK_KOMOOT_LINK
+
+    try:
+        rename_favorite(user.id, int(favorite_id), text)
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            await update.message.reply_text("Favorite with this name already exists.")
+            return ASK_RENAME_FAVORITE
+        logger.error("Failed to rename favorite: %s", exc, exc_info=True)
+        await update.message.reply_text("Failed to rename favorite.")
+        return ASK_KOMOOT_LINK
+
+    context.user_data.pop("favorite_rename_id", None)
+    context.user_data.pop("favorite_rename_old_name", None)
+    await update.message.reply_text(f"✅ Favorite renamed to: {text}")
+    return await show_favorites(update, context)
+
+
+async def ask_favorite_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text == RESTART_BUTTON:
+        return await start(update, context)
+    if text == "❌ Cancel":
+        await update.message.reply_text(
+            "Cancelled.",
+            reply_markup=main_keyboard(include_save=True),
+        )
+        return ASK_KOMOOT_LINK
+
+    if not (1 <= len(text) <= 64):
+        await update.message.reply_text("Name must be between 1 and 64 chars.")
+        return ASK_FAVORITE_NAME
+
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Unable to identify user.")
+        return ASK_KOMOOT_LINK
+
+    total = count_favorites(user.id)
+    if total >= MAX_FAVORITES_PER_USER:
+        await update.message.reply_text(
+            f"You reached the favorites limit ({MAX_FAVORITES_PER_USER}).",
+            reply_markup=main_keyboard(include_save=True),
+        )
+        return ASK_KOMOOT_LINK
+
+    gpx_path = context.user_data.get("gpx_path")
+    if not gpx_path or not os.path.exists(gpx_path):
+        await update.message.reply_text("Route GPX is not available.")
+        return ASK_KOMOOT_LINK
+
+    gpx_size = os.path.getsize(gpx_path)
+    if gpx_size > MAX_GPX_SIZE_BYTES:
+        await update.message.reply_text("Route GPX is too large to store.")
+        return ASK_KOMOOT_LINK
+
+    with open(gpx_path, "rb") as f:
+        gpx_blob = f.read()
+
+    try:
+        create_favorite(
+            telegram_user_id=user.id,
+            name=text,
+            source_type=context.user_data.get("source_type", "komoot"),
+            komoot_url=context.user_data.get("komoot_link"),
+            gpx_blob=gpx_blob,
+            gpx_filename=context.user_data.get("gpx_filename"),
+            timezone=context.user_data.get("route_timezone"),
+        )
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            await update.message.reply_text("Favorite with this name already exists.")
+            return ASK_FAVORITE_NAME
+        logger.error("Failed to save favorite: %s", exc, exc_info=True)
+        await update.message.reply_text("Failed to save favorite.")
+        return ASK_KOMOOT_LINK
+
+    await update.message.reply_text(
+        f"✅ Saved to favorites: {text}",
+        reply_markup=main_keyboard(include_save=True),
+    )
+    return ASK_KOMOOT_LINK
 
 
 async def ask_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -328,6 +580,7 @@ async def process_gpx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         selected_datetime = selected_datetime.astimezone(route_tz)
     context.user_data["selected_datetime"] = selected_datetime
+    context.user_data["route_timezone"] = timezone_label
 
     await update.message.reply_text(
         f"🌤️ Generating weather dashboard (Time Zone {timezone_label})...",
@@ -379,12 +632,13 @@ async def show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚴 Speed: {speed} km/h",
         parse_mode="HTML",
     )
-    context.user_data.clear()
+    context.user_data["can_save_favorite"] = True
     await update.message.reply_text(
         "🌤️ <b>Ready for another route?</b>\n\n"
-        "Send a public Komoot link or upload a GPX file:",
+        "Send a public Komoot link, upload a GPX file, choose Favorites,\n"
+        "or save this route to Favorites.",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardMarkup([[RESTART_BUTTON]], resize_keyboard=True),
+        reply_markup=main_keyboard(include_save=True),
     )
     return ASK_KOMOOT_LINK
 
@@ -397,7 +651,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel - cancel current flow\n\n"
         "You can send:\n"
         "• public Komoot route link\n"
-        "• GPX file (up to 5MB)"
+        "• GPX file (up to 5MB)\n"
+        "• use ⭐ Favorites for quick route selection"
     )
 
 
@@ -412,6 +667,7 @@ def main():
         print("❌ Error: set WEATHER_TELEGRAM_TOKEN (or TELEGRAM_TOKEN) in env")
         return
 
+    init_db()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
@@ -423,6 +679,9 @@ def main():
             ASK_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_date)],
             ASK_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_time)],
             ASK_SPEED: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_speed)],
+            ASK_FAVORITE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_favorite_name)],
+            SELECT_FAVORITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_favorite_selection)],
+            ASK_RENAME_FAVORITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_rename_favorite)],
         },
         fallbacks=[CommandHandler("cancel", cancel_command), CommandHandler("start", start)],
         allow_reentry=True,

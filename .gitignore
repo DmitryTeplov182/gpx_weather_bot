@@ -76,6 +76,7 @@ dashboard_*.png
 __pycache__/bot.cpython-*.pyc
 
 .cache.sqlite
+weather_bot.db
 
 *.png
 
