@@ -48,6 +48,10 @@ SAVE_FAVORITE_BUTTON = "⭐ Save to Favorites"
 DELETE_FAVORITE_BUTTON = "🗑 Delete Favorite"
 RENAME_FAVORITE_BUTTON = "✏️ Rename Favorite"
 MAX_FAVORITES_PER_USER = 10
+# Latin + full Cyrillic block (incl. Serbian Cyrillic) + Georgian blocks + digits/space/hyphen
+FAVORITE_NAME_PATTERN = re.compile(
+    r"^[A-Za-z\u0400-\u04FF\u10A0-\u10FF\u1C90-\u1CBF0-9\- ]+$"
+)
 
 # Для отдельного погодного бота можно задать отдельный токен:
 # WEATHER_TELEGRAM_TOKEN=...
@@ -318,6 +322,11 @@ async def ask_rename_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not (1 <= len(text) <= 64):
         await update.message.reply_text("Name must be between 1 and 64 chars.")
         return ASK_RENAME_FAVORITE
+    if not FAVORITE_NAME_PATTERN.fullmatch(text):
+        await update.message.reply_text(
+            "Invalid name. Allowed chars: A-Z, a-z, А-Я, а-я, 0-9, space and '-'."
+        )
+        return ASK_RENAME_FAVORITE
 
     user = update.effective_user
     favorite_id = context.user_data.get("favorite_rename_id")
@@ -354,6 +363,11 @@ async def ask_favorite_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not (1 <= len(text) <= 64):
         await update.message.reply_text("Name must be between 1 and 64 chars.")
+        return ASK_FAVORITE_NAME
+    if not FAVORITE_NAME_PATTERN.fullmatch(text):
+        await update.message.reply_text(
+            "Invalid name. Allowed chars: A-Z, a-z, А-Я, а-я, 0-9, space and '-'."
+        )
         return ASK_FAVORITE_NAME
 
     user = update.effective_user
