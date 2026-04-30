@@ -107,13 +107,22 @@ def calculate_route_time_points(points, start_time, speed_kmh=27, timezone_name=
     # print(f"📏 Общая дистанция: {total_distance/1000:.2f} км")  # Убрано для чистоты вывода
     # print(f"⏱️  Время маршрута: {total_distance/speed_ms/3600:.2f} часов")  # Убрано для чистоты вывода
     
-    # Разбиваем маршрут на интервалы по 6 км каждый
+    # Разбиваем маршрут на интервалы по 6 км, включая старт (0 км) и финиш.
     interval_distance_km = 6.0  # 6 км между точками
-    num_intervals = max(1, int(total_distance / 1000 / interval_distance_km))
-    
+    interval_distance_m = interval_distance_km * 1000
     route_points = []
-    for i in range(num_intervals):
-        target_distance = (i + 1) * interval_distance_km * 1000  # в метрах
+
+    # Стартовая точка маршрута (0 км) обязательна, иначе на карте "обрезается" начало трека.
+    route_points.append({
+        'lat': points[0]['lat'],
+        'lon': points[0]['lon'],
+        'time': start_time,
+        'distance_km': 0.0,
+        'ele': points[0].get('ele', 0)
+    })
+
+    target_distance = interval_distance_m
+    while target_distance < total_distance:
         
         # Находим точку на нужном расстоянии
         accumulated_distance = 0
@@ -149,7 +158,21 @@ def calculate_route_time_points(points, start_time, speed_kmh=27, timezone_name=
                 break
             
             accumulated_distance += segment_distance
-    
+
+        target_distance += interval_distance_m
+
+    # Всегда добавляем финишную точку, если её ещё нет в выборке.
+    finish_distance_km = total_distance / 1000
+    if route_points[-1]['distance_km'] < finish_distance_km:
+        finish_time = start_time + timedelta(seconds=total_distance / speed_ms)
+        route_points.append({
+            'lat': points[-1]['lat'],
+            'lon': points[-1]['lon'],
+            'time': finish_time,
+            'distance_km': finish_distance_km,
+            'ele': points[-1].get('ele', 0)
+        })
+
     return route_points
 
 def calculate_distance(lat1, lon1, lat2, lon2):
