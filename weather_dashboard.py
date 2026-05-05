@@ -259,10 +259,12 @@ def get_weather_data_for_route(route_points):
                 "relative_humidity_2m",
                 "wind_speed_10m",
                 "wind_direction_10m",
+                "wind_gusts_10m",
                 "pressure_msl",
                 "weather_code",
                 "precipitation",
-                "precipitation_probability"
+                "precipitation_probability",
+                "cloud_cover"
             ],
             "timezone": "auto",
             "start_date": start_time.strftime('%Y-%m-%d'),
@@ -297,10 +299,12 @@ def get_weather_data_for_route(route_points):
             hourly_relative_humidity_2m = hourly.Variables(2).ValuesAsNumpy()
             hourly_wind_speed_10m = hourly.Variables(3).ValuesAsNumpy()
             hourly_wind_direction_10m = hourly.Variables(4).ValuesAsNumpy()
-            hourly_pressure_msl = hourly.Variables(5).ValuesAsNumpy()
-            hourly_weather_code = hourly.Variables(6).ValuesAsNumpy()
-            hourly_precipitation = hourly.Variables(7).ValuesAsNumpy()
-            hourly_precipitation_probability = hourly.Variables(8).ValuesAsNumpy()
+            hourly_wind_gusts_10m = hourly.Variables(5).ValuesAsNumpy()
+            hourly_pressure_msl = hourly.Variables(6).ValuesAsNumpy()
+            hourly_weather_code = hourly.Variables(7).ValuesAsNumpy()
+            hourly_precipitation = hourly.Variables(8).ValuesAsNumpy()
+            hourly_precipitation_probability = hourly.Variables(9).ValuesAsNumpy()
+            hourly_cloud_cover = hourly.Variables(10).ValuesAsNumpy()
             
             # Open-Meteo отдает wind_speed_10m в км/ч, если явно не запрошена другая единица.
             weather_data.append({
@@ -311,10 +315,12 @@ def get_weather_data_for_route(route_points):
                 'humidity': hourly_relative_humidity_2m[closest_time],
                 'wind_speed': hourly_wind_speed_10m[closest_time],
                 'wind_direction': hourly_wind_direction_10m[closest_time],
+                'wind_gusts': hourly_wind_gusts_10m[closest_time],
                 'pressure': hourly_pressure_msl[closest_time],
                 'weather_code': int(hourly_weather_code[closest_time]),
                 'precipitation_mm': hourly_precipitation[closest_time],
-                'precipitation_probability': hourly_precipitation_probability[closest_time]
+                'precipitation_probability': hourly_precipitation_probability[closest_time],
+                'cloud_cover': hourly_cloud_cover[closest_time]
             })
             
         except Exception as e:
@@ -388,6 +394,7 @@ def create_weather_dashboard(
     ax1 = plt.subplot(3, 2, 1)
     temperatures = [w['temperature'] for w in weather_data_clean]
     feels_like = [w['feels_like'] for w in weather_data_clean]
+    cloud_cover = [min(100, max(0, w['cloud_cover'])) for w in weather_data_clean]
     
     ax1.plot(times, temperatures, color='#1f77b4', linewidth=4, label='Temperature (°C)')
     ax1.plot(times, feels_like, color='#ff7f0e', linewidth=4, label='Feels Like (°C)')
@@ -434,13 +441,22 @@ def create_weather_dashboard(
     )
     ax2_twin.set_ylim(0, 100)
     ax2_twin.set_xlim(min(times), max(times))
+    ax2_twin.plot(
+        times,
+        cloud_cover,
+        color='#7f8c8d',
+        linewidth=2.5,
+        linestyle='--',
+        label='Cloud Cover (%)',
+        zorder=3,
+    )
 
     # График осадков (столбчатая диаграмма)
     ax2.bar(
         times,
         precipitation_mm,
         alpha=0.9,
-        color='#1f4e79',
+        color='#1f77b4',
         label='Precipitation (mm)',
         width=precip_bar_width_days * 0.62,
         zorder=5,
@@ -453,7 +469,7 @@ def create_weather_dashboard(
 
     lines1, labels1 = ax2.get_legend_handles_labels()
     lines2, labels2 = ax2_twin.get_legend_handles_labels()
-    ax2_twin.legend(
+    precip_legend = ax2.legend(
         lines1 + lines2,
         labels1 + labels2,
         loc='upper left',
@@ -462,6 +478,7 @@ def create_weather_dashboard(
         facecolor='white',
         edgecolor='gray',
     )
+    precip_legend.set_zorder(20)
     ax2.grid(True, alpha=0.3, linewidth=0.5)
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=plot_tz))
     ax2.tick_params(colors='#333333')
@@ -670,9 +687,21 @@ def create_weather_dashboard(
     # 4. Wind (средний правый)
     ax4 = plt.subplot(3, 2, 4)
     wind_speeds = [w['wind_speed'] for w in weather_data_clean]  # км/ч
+    wind_gusts = [max(0, w['wind_gusts']) for w in weather_data_clean]  # км/ч
+    wind_ymax = max(1, max(max(wind_speeds), max(wind_gusts)) * 1.2)
     
-    ax4.plot(times, wind_speeds, color='#1f77b4', linewidth=4, label='Wind (km/h)')
+    ax4.bar(
+        times,
+        wind_gusts,
+        alpha=0.6,
+        color='#d4d9df',
+        label='Wind Gusts (km/h)',
+        width=precip_bar_width_days,
+        zorder=1,
+    )
+    ax4.plot(times, wind_speeds, color='#1f77b4', linewidth=4, label='Wind (km/h)', zorder=5)
     ax4.set_title('Wind', fontweight='bold', color='#333333')
+    ax4.set_ylim(0, wind_ymax)
     ax4.legend(loc='upper left', fontsize=8, 
               framealpha=0.9, facecolor='white', edgecolor='gray')
     ax4.grid(True, alpha=0.3, linewidth=0.5)
