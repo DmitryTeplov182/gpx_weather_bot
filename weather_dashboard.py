@@ -469,9 +469,15 @@ def create_weather_dashboard(
 
     lines1, labels1 = ax2.get_legend_handles_labels()
     lines2, labels2 = ax2_twin.get_legend_handles_labels()
+    legend_items = dict(zip(labels1 + labels2, lines1 + lines2))
+    legend_order = [
+        'Precipitation (mm)',
+        'Precipitation Probability (%)',
+        'Cloud Cover (%)',
+    ]
     precip_legend = ax2.legend(
-        lines1 + lines2,
-        labels1 + labels2,
+        [legend_items[label] for label in legend_order if label in legend_items],
+        [label for label in legend_order if label in legend_items],
         loc='upper left',
         fontsize=8,
         framealpha=0.9,
@@ -670,8 +676,13 @@ def create_weather_dashboard(
     ax3.set_title('Wind Direction', fontweight='bold', color='#333333')
     ax3.set_xticks([])
     ax3.set_yticks([])
-    ax3.legend(loc='upper right', fontsize=8, 
-              framealpha=0.9, facecolor='white', edgecolor='gray')
+    ax3.legend(
+        loc='upper right',
+        fontsize=8,
+        framealpha=0.9,
+        facecolor='white',
+        edgecolor='gray',
+    )
     ax3.grid(False)
     ax3.text(
         0.5,
@@ -702,8 +713,13 @@ def create_weather_dashboard(
     ax4.plot(times, wind_speeds, color='#1f77b4', linewidth=4, label='Wind (km/h)', zorder=5)
     ax4.set_title('Wind', fontweight='bold', color='#333333')
     ax4.set_ylim(0, wind_ymax)
-    ax4.legend(loc='upper left', fontsize=8, 
-              framealpha=0.9, facecolor='white', edgecolor='gray')
+    ax4.legend(
+        loc='upper left',
+        fontsize=8,
+        framealpha=0.9,
+        facecolor='white',
+        edgecolor='gray',
+    )
     ax4.grid(True, alpha=0.3, linewidth=0.5)
     ax4.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=plot_tz))
     ax4.set_xlim(min(times), max(times))  # Ограничиваем ось X только временем заезда
