@@ -261,8 +261,8 @@ def get_weather_data_for_route(route_points):
                 "wind_direction_10m",
                 "pressure_msl",
                 "weather_code",
-                "precipitation_probability",
-                "cloud_cover"
+                "precipitation",
+                "precipitation_probability"
             ],
             "timezone": "auto",
             "start_date": start_time.strftime('%Y-%m-%d'),
@@ -299,8 +299,8 @@ def get_weather_data_for_route(route_points):
             hourly_wind_direction_10m = hourly.Variables(4).ValuesAsNumpy()
             hourly_pressure_msl = hourly.Variables(5).ValuesAsNumpy()
             hourly_weather_code = hourly.Variables(6).ValuesAsNumpy()
-            hourly_precipitation_probability = hourly.Variables(7).ValuesAsNumpy()
-            hourly_cloud_cover = hourly.Variables(8).ValuesAsNumpy()
+            hourly_precipitation = hourly.Variables(7).ValuesAsNumpy()
+            hourly_precipitation_probability = hourly.Variables(8).ValuesAsNumpy()
             
             # Open-Meteo отдает wind_speed_10m в км/ч, если явно не запрошена другая единица.
             weather_data.append({
@@ -313,8 +313,8 @@ def get_weather_data_for_route(route_points):
                 'wind_direction': hourly_wind_direction_10m[closest_time],
                 'pressure': hourly_pressure_msl[closest_time],
                 'weather_code': int(hourly_weather_code[closest_time]),
-                'precipitation_probability': hourly_precipitation_probability[closest_time],
-                'cloud_cover': hourly_cloud_cover[closest_time]
+                'precipitation_mm': hourly_precipitation[closest_time],
+                'precipitation_probability': hourly_precipitation_probability[closest_time]
             })
             
         except Exception as e:
@@ -399,32 +399,73 @@ def create_weather_dashboard(
     ax1.tick_params(colors='#333333')
     plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, fontsize=8)
     
-    # 2. Precipitation and Cloud Cover (верхний правый)
+    # 2. Precipitation (верхний правый)
     ax2 = plt.subplot(3, 2, 2)
-    precipitation_prob = [max(0, w['precipitation_probability']) for w in weather_data_clean]  # Убираем отрицательные значения
-    cloud_cover = [w['cloud_cover'] for w in weather_data_clean]
+    precipitation_mm = [max(0, w['precipitation_mm']) for w in weather_data_clean]
+    max_precipitation_mm = max(precipitation_mm) if precipitation_mm else 0
+    precipitation_ymax = max(1, max_precipitation_mm * 1.3)
+    precipitation_probability_raw = [
+        min(100, max(0, w['precipitation_probability']))
+        for w in weather_data_clean
+    ]
+    precipitation_probability = [
+        probability if precipitation > 0 else 0
+        for precipitation, probability in zip(precipitation_mm, precipitation_probability_raw)
+    ]
+    precip_bar_width_days = 1 / 24  # fallback: 1 hour
+    if len(times) > 1:
+        positive_steps = sorted(
+            (times[i + 1] - times[i]).total_seconds() / 86400
+            for i in range(len(times) - 1)
+            if (times[i + 1] - times[i]).total_seconds() > 0
+        )
+        if positive_steps:
+            precip_bar_width_days = positive_steps[len(positive_steps) // 2] * 0.8
     
-    # График осадков (столбчатая диаграмма)
-    ax2.bar(times, precipitation_prob, alpha=0.7, color='#87ceeb', label='Precipitation (%)', width=0.8, zorder=5)
-    ax2.set_ylim(0, 100)  # Ограничиваем от 0 до 100%
-    ax2.set_xlim(min(times), max(times))  # Ограничиваем ось X только временем заезда
-    
-    # График облачности (линия на правой оси)
     ax2_twin = ax2.twinx()
-    ax2_twin.plot(times, cloud_cover, color='#808080', linewidth=4, label='Cloud Cover (%)', zorder=1)
-    ax2_twin.set_ylim(0, 100)  # Ограничиваем от 0 до 100%
-    ax2_twin.set_xlim(min(times), max(times))  # Ограничиваем ось X только временем заезда
-    
-    ax2.set_title('Precipitation and Cloud Cover', fontweight='bold', color='#333333')
-    # Объединяем легенды на одной оси
+    ax2_twin.bar(
+        times,
+        precipitation_probability,
+        alpha=0.6,
+        color='#d4d9df',
+        label='Precipitation Probability (%)',
+        width=precip_bar_width_days,
+        zorder=1,
+    )
+    ax2_twin.set_ylim(0, 100)
+    ax2_twin.set_xlim(min(times), max(times))
+
+    # График осадков (столбчатая диаграмма)
+    ax2.bar(
+        times,
+        precipitation_mm,
+        alpha=0.9,
+        color='#1f4e79',
+        label='Precipitation (mm)',
+        width=precip_bar_width_days * 0.62,
+        zorder=5,
+    )
+    ax2.set_zorder(ax2_twin.get_zorder() + 1)
+    ax2.patch.set_alpha(0)
+    ax2.set_ylim(0, precipitation_ymax)
+    ax2.set_xlim(min(times), max(times))  # Ограничиваем ось X только временем заезда
+    ax2.set_title('Precipitation', fontweight='bold', color='#333333')
+
     lines1, labels1 = ax2.get_legend_handles_labels()
     lines2, labels2 = ax2_twin.get_legend_handles_labels()
-    ax2_twin.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=8, 
-                   framealpha=0.9, facecolor='white', edgecolor='gray')
+    ax2_twin.legend(
+        lines1 + lines2,
+        labels1 + labels2,
+        loc='upper left',
+        fontsize=8,
+        framealpha=0.9,
+        facecolor='white',
+        edgecolor='gray',
+    )
     ax2.grid(True, alpha=0.3, linewidth=0.5)
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=plot_tz))
     ax2.tick_params(colors='#333333')
-    ax2_twin.tick_params(colors='#333333')
+    ax2_twin.tick_params(colors='#9aa3ad')
     plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, fontsize=8)
     
     # 3. Wind Direction Map (занимает 2 строки - средний и нижний левый)
@@ -643,11 +684,12 @@ def create_weather_dashboard(
     # 5. Elevation (нижний правый)
     ax5 = plt.subplot(3, 2, 6)
     elevations = [p['ele'] for p in route_points_clean]
+    min_elevation = min(elevations) if elevations else 0
     
-    ax5.fill_between(times, elevations, alpha=0.7, color='#ff7f0e')
+    ax5.fill_between(times, elevations, min_elevation, alpha=0.7, color='#ff7f0e')
     ax5.plot(times, elevations, color='#ff6b6b', linewidth=4)
     ax5.set_title('Elevation', fontweight='bold', color='#333333')
-    ax5.set_ylim(0, None)  # Минимальное значение высоты = 0
+    ax5.set_ylim(min_elevation, None)
     ax5.grid(True, alpha=0.3, linewidth=0.5)
     ax5.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=plot_tz))
     ax5.set_xlim(min(times), max(times))  # Ограничиваем ось X только временем заезда

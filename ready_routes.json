@@ -1,13 +1,6 @@
 {
   "ready_routes": [
     {
-      "name": "Руменка - Футог - Яма(От Бульвара Европы)",
-      "komoot_link": "https://www.komoot.com/tour/2526993761",
-      "start_point": "Макси у Бульвара Европы",
-      "start_point_link": "https://maps.app.goo.gl/3ZbDZM9VVRBDDddp8?g_st=ipc",
-      "comment": "Темповая тренировка, держим ровный ход."
-    },
-    {
       "name": "Frushka Lite CCW(от Флагов)",
       "komoot_link": "https://www.komoot.com/tour/2396106518",
       "start_point": "Флаги",
