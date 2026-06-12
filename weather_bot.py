@@ -66,6 +66,20 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 MAX_GPX_SIZE_BYTES = 5 * 1024 * 1024  # 5MB
 
 
+def resolve_route_timezone(gpx_path: str | None = None):
+    """Timezone for user date/time: route GPX when available, else server default."""
+    if gpx_path and os.path.exists(gpx_path):
+        tz_name = detect_timezone_from_gpx(gpx_path)
+        if tz_name:
+            return get_timezone(tz_name)
+    return get_timezone()
+
+
+def localize_user_datetime(dt: datetime, tz) -> datetime:
+    """User-entered wall-clock time is always in route local time, not server TZ."""
+    return tz.localize(dt.replace(tzinfo=None))
+
+
 def main_keyboard(include_save: bool = False) -> ReplyKeyboardMarkup:
     rows = [[RESTART_BUTTON, FAVORITES_BUTTON]]
     if include_save:
@@ -429,7 +443,7 @@ async def ask_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Cancelled.", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
 
-    tz = get_timezone()
+    tz = resolve_route_timezone(context.user_data.get("gpx_path"))
     now = datetime.now(tz)
     selected_date = None
 
@@ -501,9 +515,11 @@ async def ask_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Enter time in HH:MM format")
         return ASK_TIME
 
-    tz = get_timezone()
+    tz = resolve_route_timezone(context.user_data.get("gpx_path"))
     selected_date = context.user_data["selected_date"]
-    context.user_data["selected_datetime"] = tz.localize(datetime.combine(selected_date, time_obj))
+    context.user_data["selected_datetime"] = localize_user_datetime(
+        datetime.combine(selected_date, time_obj), tz
+    )
 
     speeds = [
         ["🚴 15 km/h", "🚴 20 km/h"],
@@ -588,11 +604,8 @@ async def process_gpx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     route_tz = get_timezone(route_timezone_name)
     timezone_label = getattr(route_tz, "zone", str(route_tz))
 
-    # Ensure selected_datetime is represented in route timezone.
-    if selected_datetime.tzinfo is None:
-        selected_datetime = route_tz.localize(selected_datetime)
-    else:
-        selected_datetime = selected_datetime.astimezone(route_tz)
+    # Re-bind to route TZ without shifting wall-clock (13:00 stays 13:00 in Tbilisi).
+    selected_datetime = localize_user_datetime(selected_datetime, route_tz)
     context.user_data["selected_datetime"] = selected_datetime
     context.user_data["route_timezone"] = timezone_label
 
