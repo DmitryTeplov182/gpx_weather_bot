@@ -1,11 +1,14 @@
 import os
 import re
+import sys
 import json
 import subprocess
+import requests
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    InputMediaPhoto,
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -49,6 +52,32 @@ TIMEZONE = os.getenv('TIMEZONE', 'Europe/Belgrade')
 KOMOOT_LINK_PATTERN = re.compile(r'(https?://)?(www\.)?komoot\.[^/]+/tour/(\d+)')
 CACHE_DIR = 'cache'
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+KOMOOT_API_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    'Accept': 'application/hal+json,application/json',
+}
+
+def fetch_komoot_tour_meta(tour_id):
+    """Получает метаданные тура из неофициального API Komoot.
+
+    Komoot отдаёт сглаженные значения длины и набора — они точнее,
+    чем расчёт по сырым точкам GPX. Работает только для публичных туров.
+    Возвращает dict {name, distance_m, elevation_up} или None при любой ошибке.
+    """
+    url = f'https://api.komoot.de/v007/tours/{tour_id}'
+    try:
+        response = requests.get(url, headers=KOMOOT_API_HEADERS, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return {
+            'name': data.get('name'),
+            'distance_m': data.get('distance'),
+            'elevation_up': data.get('elevation_up'),
+        }
+    except Exception as e:
+        logger.warning(f"Не удалось получить метаданные Komoot для тура {tour_id}: {e}")
+        return None
 
 def load_points_from_file(filename, fallback_points=None):
     """Загружает точки из JSON файла
@@ -139,6 +168,9 @@ PACE_OPTIONS = [
     '🌝🌝🌗',
     '🌝🌝🌝',
 ]
+
+# Маппинг лун на шкалу темпа постера (1.0–3.0)
+PACE_TO_POSTER = dict(zip(PACE_OPTIONS, [1.0, 1.5, 2.0, 2.5, 3.0]))
 
 RU_WEEKDAYS = [
     'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'
@@ -1068,6 +1100,21 @@ async def process_gpx(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Автоматически извлекаем название из GPX
         extracted_name = extract_route_name_from_gpx(gpx_path)
+
+        # Пробуем уточнить длину/набор по данным Komoot (сглаженные значения точнее GPX)
+        tour_meta = await asyncio.to_thread(fetch_komoot_tour_meta, tour_id)
+        if tour_meta:
+            if tour_meta.get('distance_m') is not None:
+                context.user_data['length_km'] = round(tour_meta['distance_m'] / 1000)
+            if tour_meta.get('elevation_up') is not None:
+                context.user_data['uphill'] = round(tour_meta['elevation_up'])
+            if not extracted_name and tour_meta.get('name'):
+                extracted_name = tour_meta['name']
+            logger.info(
+                f"Метаданные Komoot: длина {context.user_data['length_km']} км, "
+                f"набор {context.user_data['uphill']} м"
+            )
+
         if extracted_name:
             context.user_data['extracted_name'] = extracted_name
             logger.info(f"Извлечено название из GPX: {extracted_name}")
@@ -1398,18 +1445,101 @@ async def ask_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📷 <b>Хотите добавить картинку к анонсу?</b>\n\n"
             "Вы можете:\n"
-            "• Прислать свою картинку\n"
             "• Сгенерировать <b>дашборд погоды</b> для маршрута\n"
+            "• Сгенерировать <b>постер заезда</b>\n"
+            "• Сгенерировать <b>оба</b> изображения\n"
+            "• Прислать свою картинку\n"
             "• Или пропустить этот шаг",
             parse_mode='HTML',
             reply_markup=ReplyKeyboardMarkup([
-                ["🌤️ Сгенерировать дашборд погоды (BETA)"],
+                ["🌤️ Дашборд погоды"],
+                ["🖼️ Постер заезда"],
+                ["🌤️🖼️ Оба"],
                 ["📷 Прислать картинку"],
                 ["⏭️ Пропустить"],
                 ["❌ Отмена"]
             ], one_time_keyboard=True, resize_keyboard=True)
         )
     return ASK_IMAGE
+
+async def generate_dashboard_for_announce(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Генерирует дашборд погоды и сохраняет путь в user_data. Возвращает успех."""
+    gpx_path = context.user_data.get('gpx_path')
+    parsed_datetime = context.user_data.get('parsed_datetime')
+
+    if not gpx_path or not parsed_datetime:
+        await update.message.reply_text(
+            "❌ <b>Ошибка:</b> Не найден GPX файл или время старта",
+            parse_mode='HTML'
+        )
+        return False
+
+    await update.message.reply_text(
+        "🌤️ <b>Генерирую дашборд погоды...</b>\n\n"
+        "Это может занять 1-2 минуты ⏳",
+        parse_mode='HTML'
+    )
+
+    # Имя файла включает id пользователя: два чата с одним туром не должны
+    # перезаписывать/удалять файлы друг друга
+    user_id = update.effective_user.id if update.effective_user else 'anon'
+    dashboard_path = f"dashboard_{user_id}_{context.user_data.get('tour_id', 'temp')}.png"
+    success = await asyncio.to_thread(
+        generate_weather_dashboard, gpx_path, parsed_datetime, dashboard_path
+    )
+
+    if success:
+        context.user_data['dashboard_path'] = dashboard_path
+        await update.message.reply_text(
+            "✅ <b>Дашборд погоды успешно сгенерирован!</b>",
+            parse_mode='HTML'
+        )
+    else:
+        kept = "Оставляем предыдущий дашборд." if context.user_data.get('dashboard_path') else "Продолжаем без дашборда."
+        await update.message.reply_text(
+            "❌ <b>Не удалось сгенерировать дашборд погоды</b>\n\n"
+            "Возможно, проблемы с интернетом или данными.\n"
+            f"{kept}",
+            parse_mode='HTML'
+        )
+    return success
+
+async def generate_poster_for_announce(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Генерирует постер заезда и сохраняет путь в user_data. Возвращает успех."""
+    gpx_path = context.user_data.get('gpx_path')
+
+    if not gpx_path:
+        await update.message.reply_text(
+            "❌ <b>Ошибка:</b> Не найден GPX файл",
+            parse_mode='HTML'
+        )
+        return False
+
+    await update.message.reply_text(
+        "🖼️ <b>Генерирую постер заезда...</b> ⏳",
+        parse_mode='HTML'
+    )
+
+    user_id = update.effective_user.id if update.effective_user else 'anon'
+    poster_path = f"poster_{user_id}_{context.user_data.get('tour_id', 'temp')}.png"
+    success = await asyncio.to_thread(
+        generate_ride_poster, gpx_path, dict(context.user_data), poster_path
+    )
+
+    if success:
+        context.user_data['poster_path'] = poster_path
+        await update.message.reply_text(
+            "✅ <b>Постер заезда успешно сгенерирован!</b>",
+            parse_mode='HTML'
+        )
+    else:
+        kept = "Оставляем предыдущий постер." if context.user_data.get('poster_path') else "Продолжаем без постера."
+        await update.message.reply_text(
+            "❌ <b>Не удалось сгенерировать постер заезда</b>\n\n"
+            f"{kept}",
+            parse_mode='HTML'
+        )
+    return success
 
 async def ask_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает выбор или изменение картинки для анонса"""
@@ -1418,6 +1548,8 @@ async def ask_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем самое большое фото
         photo = update.message.photo[-1]
         context.user_data['announce_image'] = photo.file_id
+        # Своя картинка заменяет сгенерированные изображения, а не прячет их
+        invalidate_generated_images(context)
 
         await update.message.reply_text(
             "✅ <b>Картинка добавлена к анонсу!</b>",
@@ -1447,44 +1579,12 @@ async def ask_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    if text == "🌤️ Сгенерировать дашборд погоды (BETA)":
-        # Генерируем дашборд погоды
-        gpx_path = context.user_data.get('gpx_path')
-        parsed_datetime = context.user_data.get('parsed_datetime')
-
-        if not gpx_path or not parsed_datetime:
-            await update.message.reply_text(
-                "❌ <b>Ошибка:</b> Не найден GPX файл или время старта",
-                parse_mode='HTML'
-            )
-            return await preview_step(update, context)
-
-        await update.message.reply_text(
-            "🌤️ <b>Генерирую дашборд погоды...</b>\n\n"
-            "Это может занять 1-2 минуты ⏳",
-            parse_mode='HTML'
-        )
-
-        # Генерируем дашборд
-        dashboard_path = f"dashboard_{context.user_data.get('tour_id', 'temp')}.png"
-        success = generate_weather_dashboard(gpx_path, parsed_datetime, dashboard_path)
-
-        if success:
-            # Сохраняем путь к дашборду
-            context.user_data['dashboard_path'] = dashboard_path
-            await update.message.reply_text(
-                "✅ <b>Дашборд погоды успешно сгенерирован!</b>\n\n"
-                "Он будет использован в анонсе вместо обычной картинки.",
-                parse_mode='HTML'
-            )
-        else:
-            await update.message.reply_text(
-                "❌ <b>Не удалось сгенерировать дашборд погоды</b>\n\n"
-                "Возможно, проблемы с интернетом или данными.\n"
-                "Продолжаем без дашборда.",
-                parse_mode='HTML'
-            )
-
+    if text in ("🌤️ Дашборд погоды", "🖼️ Постер заезда", "🌤️🖼️ Оба",
+                "🌤️ Сгенерировать дашборд погоды (BETA)"):
+        if text in ("🖼️ Постер заезда", "🌤️🖼️ Оба"):
+            await generate_poster_for_announce(update, context)
+        if text in ("🌤️ Дашборд погоды", "🌤️🖼️ Оба", "🌤️ Сгенерировать дашборд погоды (BETA)"):
+            await generate_dashboard_for_announce(update, context)
         return await preview_step(update, context)
 
     if text == "📷 Прислать картинку":
@@ -1527,26 +1627,34 @@ async def ask_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ASK_IMAGE
 
-    if text == "⏭️ Оставить дашборд":
-        # Возвращаемся к предпросмотру, оставляя дашборд
+    if text in ("⏭️ Оставить дашборд", "⏭️ Оставить как есть"):
+        # Возвращаемся к предпросмотру, оставляя сгенерированные изображения
         return await preview_step(update, context)
 
     # Если пришел неизвестный текст
     # Проверяем режим редактирования
     if context.user_data.get('edit_mode'):
+        keyboard = []
+        if context.user_data.get('gpx_path'):
+            keyboard.extend([
+                ["🌤️ Дашборд погоды"],
+                ["🖼️ Постер заезда"],
+                ["🌤️🖼️ Оба"],
+            ])
+        if context.user_data.get('announce_image'):
+            keyboard.append(["🗑️ Удалить картинку"])
+        keyboard.append(["⏭️ Оставить как есть"])
+        keyboard.append(["❌ Отмена"])
         await update.message.reply_text(
             "❌ Пожалуйста, пришлите картинку или выберите действие из кнопок ниже:",
-            reply_markup=ReplyKeyboardMarkup([
-                ["🗑️ Удалить картинку"],
-                ["❌ Отмена"]
-            ], one_time_keyboard=True, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         )
-    elif context.user_data.get('dashboard_path'):
-        # Если есть дашборд, показываем опции для замены
+    elif context.user_data.get('dashboard_path') or context.user_data.get('poster_path'):
+        # Если есть сгенерированные изображения, показываем опции для замены
         await update.message.reply_text(
             "❌ Пожалуйста, пришлите картинку или выберите действие из кнопок ниже:",
             reply_markup=ReplyKeyboardMarkup([
-                ["⏭️ Оставить дашборд"],
+                ["⏭️ Оставить как есть"],
                 ["❌ Отмена"]
             ], one_time_keyboard=True, resize_keyboard=True)
         )
@@ -1559,6 +1667,123 @@ async def ask_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ], one_time_keyboard=True, resize_keyboard=True)
         )
     return ASK_IMAGE
+
+def get_announce_attachments(context: ContextTypes.DEFAULT_TYPE) -> list:
+    """Возвращает пути к сгенерированным изображениям анонса (постер, дашборд)."""
+    paths = []
+    for key in ('poster_path', 'dashboard_path'):
+        path = context.user_data.get(key)
+        if path and os.path.exists(path):
+            paths.append(path)
+    return paths
+
+def remove_file_quietly(path):
+    """Удаляет файл, логируя ошибку вместо падения."""
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError as e:
+            logger.warning(f"Не удалось удалить файл {path}: {e}")
+
+def invalidate_generated_images(context: ContextTypes.DEFAULT_TYPE, poster=True, dashboard=True):
+    """Удаляет сгенерированные изображения (файлы и ссылки в user_data).
+
+    Вызывается, когда меняются данные, запечённые в изображениях
+    (дата/время — для обоих, название/старт/темп/комментарий — для постера).
+    """
+    if poster:
+        path = context.user_data.get('poster_path')
+        if path:
+            remove_file_quietly(path)
+            remove_file_quietly(os.path.join(CACHE_DIR, os.path.basename(path)))
+            stem = os.path.splitext(os.path.basename(path))[0]
+            remove_file_quietly(os.path.join(CACHE_DIR, f"{stem}_config.json"))
+        context.user_data['poster_path'] = None
+    if dashboard:
+        path = context.user_data.get('dashboard_path')
+        if path:
+            remove_file_quietly(path)
+            remove_file_quietly(os.path.join(CACHE_DIR, os.path.basename(path)))
+        context.user_data['dashboard_path'] = None
+
+# Лимит Telegram на подпись к фото/альбому (в UTF-16 code units)
+TELEGRAM_CAPTION_LIMIT = 1024
+
+def utf16_len(text: str) -> int:
+    """Длина строки так, как её считает Telegram (UTF-16 code units)."""
+    return len(text.encode('utf-16-le')) // 2
+
+async def send_announce_with_media(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                   announce: str, reply_markup=None, confirm_text=None) -> None:
+    """Отправляет анонс с картинкой/сгенерированными изображениями или текстом.
+
+    Своя картинка имеет приоритет; иначе постер и/или дашборд.
+    Два изображения уходят альбомом — caption на первом, а confirm_text
+    с клавиатурой отдельным сообщением (к media group их прикрепить нельзя).
+    """
+    announce_image = context.user_data.get('announce_image')
+    attachments = get_announce_attachments(context)
+    caption = announce + ('\n\n' + confirm_text if confirm_text else '')
+    # Подпись к фото ограничена 1024 UTF-16 юнитами (текст сообщения — 4096),
+    # поэтому длинный анонс отправляем отдельным сообщением после картинки
+    caption_fits = utf16_len(caption) <= TELEGRAM_CAPTION_LIMIT
+    announce_fits = utf16_len(announce) <= TELEGRAM_CAPTION_LIMIT
+
+    if announce_image or len(attachments) == 1:
+        photo_source = announce_image if announce_image else open(attachments[0], 'rb')
+        try:
+            if caption_fits:
+                await update.message.reply_photo(
+                    photo=photo_source,
+                    caption=caption,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_photo(photo=photo_source)
+                await update.message.reply_text(
+                    caption,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
+        finally:
+            if not announce_image:
+                photo_source.close()
+    elif len(attachments) >= 2:
+        media = []
+        opened_files = []
+        try:
+            for i, path in enumerate(attachments):
+                f = open(path, 'rb')
+                opened_files.append(f)
+                if i == 0 and announce_fits:
+                    media.append(InputMediaPhoto(f, caption=announce, parse_mode='HTML'))
+                else:
+                    media.append(InputMediaPhoto(f))
+            await update.message.reply_media_group(media=media)
+        finally:
+            for f in opened_files:
+                f.close()
+        if not announce_fits:
+            await update.message.reply_text(
+                caption,
+                parse_mode='HTML',
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+        elif confirm_text or reply_markup:
+            await update.message.reply_text(
+                confirm_text or 'Анонс выше 👆',
+                reply_markup=reply_markup
+            )
+    else:
+        await update.message.reply_text(
+            caption,
+            parse_mode='HTML',
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
 
 async def preview_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Формируем анонс
@@ -1641,44 +1866,36 @@ async def preview_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append(["📷 Добавить картинку"])
     else:
         # Для маршрутов с треком показываем все опции
+        has_dashboard = dashboard_path and os.path.exists(dashboard_path)
+        poster_path = context.user_data.get('poster_path')
+        has_poster = poster_path and os.path.exists(poster_path)
+        # Без скачанного GPX (например, /quick) генерация невозможна — кнопки не предлагаем
+        has_gpx = bool(context.user_data.get('gpx_path'))
+
         if announce_image:
             buttons.append(["🗑️ Удалить картинку"])
-        elif dashboard_path and os.path.exists(dashboard_path):
-            buttons.append(["🗑️ Удалить дашборд"])
-            buttons.append(["📷 Заменить картинкой"])
         else:
-            buttons.append(["📷 Добавить картинку"])
-            buttons.append(["🌤️ Сгенерировать дашборд (BETA)"])
+            if has_dashboard:
+                buttons.append(["🗑️ Удалить дашборд"])
+            elif has_gpx:
+                buttons.append(["🌤️ Сгенерировать дашборд"])
+            if has_poster:
+                buttons.append(["🗑️ Удалить постер"])
+            elif has_gpx:
+                buttons.append(["🖼️ Сгенерировать постер"])
+            if has_dashboard or has_poster:
+                buttons.append(["📷 Заменить картинкой"])
+            else:
+                buttons.append(["📷 Добавить картинку"])
 
     for step, name in STEP_TO_NAME.items():
         buttons.append([name])
 
-    # Проверяем, есть ли картинка или дашборд для анонса
-    dashboard_path = context.user_data.get('dashboard_path')
-    if announce_image:
-        # Отправляем картинку с caption
-        await update.message.reply_photo(
-            photo=announce_image,
-            caption=announce + '\n\nВсё верно?',
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
-        )
-    elif dashboard_path and os.path.exists(dashboard_path):
-        # Отправляем дашборд погоды как картинку
-        await update.message.reply_photo(
-            photo=open(dashboard_path, 'rb'),
-            caption=announce + '\n\nВсё верно?',
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
-        )
-    else:
-        # Отправляем обычное текстовое сообщение
-        await update.message.reply_text(
-            announce + '\n\nВсё верно?',
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True),
-            disable_web_page_preview=True
-        )
+    await send_announce_with_media(
+        update, context, announce,
+        reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True),
+        confirm_text='Всё верно?'
+    )
     return PREVIEW_STEP
 
 async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1751,27 +1968,8 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         announce = "\n".join(announce_lines)
 
-        # Проверяем, есть ли картинка или дашборд для анонса
-        announce_image = context.user_data.get('announce_image')
-        dashboard_path = context.user_data.get('dashboard_path')
-
-        if announce_image:
-            # Отправляем картинку с caption
-            await update.message.reply_photo(
-                photo=announce_image,
-                caption=announce,
-                parse_mode='HTML'
-            )
-        elif dashboard_path and os.path.exists(dashboard_path):
-            # Отправляем дашборд погоды как картинку
-            await update.message.reply_photo(
-                photo=open(dashboard_path, 'rb'),
-                caption=announce,
-                parse_mode='HTML'
-            )
-        else:
-            # Отправляем обычное текстовое сообщение
-            await update.message.reply_text(announce, parse_mode='HTML', disable_web_page_preview=True)
+        # Отправляем анонс с картинкой/постером/дашбордом или текстом
+        await send_announce_with_media(update, context, announce)
         
         # Отправляем GPX файл только если есть трек
         if gpx_path and not no_track:
@@ -1810,67 +2008,37 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return await preview_step(update, context)
 
-    if text == "🌤️ Сгенерировать дашборд (BETA)":
-        # Генерируем дашборд погоды
-        gpx_path = context.user_data.get('gpx_path')
-        parsed_datetime = context.user_data.get('parsed_datetime')
+    if text in ("🌤️ Сгенерировать дашборд", "🌤️ Сгенерировать дашборд (BETA)"):
+        await generate_dashboard_for_announce(update, context)
+        return await preview_step(update, context)
 
-        if not gpx_path or not parsed_datetime:
-            await update.message.reply_text(
-                "❌ <b>Ошибка:</b> Не найден GPX файл или время старта",
-                parse_mode='HTML'
-            )
-            return await preview_step(update, context)
-
-        await update.message.reply_text(
-            "🌤️ <b>Генерирую дашборд погоды...</b>\n\n"
-            "Это может занять 1-2 минуты ⏳",
-            parse_mode='HTML'
-        )
-
-        # Генерируем дашборд
-        dashboard_path = f"dashboard_{context.user_data.get('tour_id', 'temp')}.png"
-        success = generate_weather_dashboard(gpx_path, parsed_datetime, dashboard_path)
-
-        if success:
-            # Сохраняем путь к дашборду
-            context.user_data['dashboard_path'] = dashboard_path
-            await update.message.reply_text(
-                "✅ <b>Дашборд погоды успешно сгенерирован!</b>\n\n"
-                "Он будет использован в анонсе вместо обычной картинки.",
-                parse_mode='HTML'
-            )
-        else:
-            await update.message.reply_text(
-                "❌ <b>Не удалось сгенерировать дашборд погоды</b>\n\n"
-                "Возможно, проблемы с интернетом или данными.\n"
-                "Продолжаем без дашборда.",
-                parse_mode='HTML'
-            )
-
+    if text == "🖼️ Сгенерировать постер":
+        await generate_poster_for_announce(update, context)
         return await preview_step(update, context)
 
     if text == "🗑️ Удалить дашборд":
-        dashboard_path = context.user_data.get('dashboard_path')
-        if dashboard_path and os.path.exists(dashboard_path):
-            try:
-                os.remove(dashboard_path)
-            except:
-                pass
-        context.user_data['dashboard_path'] = None
+        invalidate_generated_images(context, poster=False)
         await update.message.reply_text(
             "✅ <b>Дашборд удален из анонса!</b>",
             parse_mode='HTML'
         )
         return await preview_step(update, context)
 
+    if text == "🗑️ Удалить постер":
+        invalidate_generated_images(context, dashboard=False)
+        await update.message.reply_text(
+            "✅ <b>Постер удален из анонса!</b>",
+            parse_mode='HTML'
+        )
+        return await preview_step(update, context)
+
     if text == "📷 Заменить картинкой":
         await update.message.reply_text(
-            "📷 <b>Пришлите картинку для замены дашборда</b>\n\n"
+            "📷 <b>Пришлите картинку для замены сгенерированных изображений</b>\n\n"
             "Или отправьте команду:",
             parse_mode='HTML',
             reply_markup=ReplyKeyboardMarkup([
-                ["⏭️ Оставить дашборд"],
+                ["⏭️ Оставить как есть"],
                 ["❌ Отмена"]
             ], one_time_keyboard=True, resize_keyboard=True)
         )
@@ -1880,6 +2048,12 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for step, name in STEP_TO_NAME.items():
         if text == name:
             context.user_data['edit_mode'] = True
+            # Сбрасываем изображения, в которые запечены редактируемые данные:
+            # дата/время влияют и на прогноз, и на постер; остальное — только на постер
+            if step in (ASK_DATE, ASK_TIME):
+                invalidate_generated_images(context)
+            elif step in (ASK_ROUTE_NAME, ASK_START_POINT, ASK_PACE, ASK_COMMENT):
+                invalidate_generated_images(context, dashboard=False)
             if step == ASK_DATE:
                 return await ask_date(update, context)
             elif step == ASK_TIME:
@@ -1890,6 +2064,8 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['length_km'] = None
                 context.user_data['uphill'] = None
                 context.user_data['extracted_name'] = None
+                # Сгенерированные изображения относятся к старому маршруту
+                invalidate_generated_images(context)
                 keyboard = []
                 for route in ROUTE_COMMENTS:
                     keyboard.append([f"🔗 {route['name']}"])
@@ -1925,14 +2101,22 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text('Введи комментарий:', reply_markup=ReplyKeyboardRemove())
                 return ASK_COMMENT
             elif step == ASK_IMAGE:
+                keyboard = []
+                if context.user_data.get('gpx_path'):
+                    keyboard.extend([
+                        ["🌤️ Дашборд погоды"],
+                        ["🖼️ Постер заезда"],
+                        ["🌤️🖼️ Оба"],
+                    ])
+                if context.user_data.get('announce_image'):
+                    keyboard.append(["🗑️ Удалить картинку"])
+                keyboard.append(["⏭️ Оставить как есть"])
+                keyboard.append(["❌ Отмена"])
                 await update.message.reply_text(
                     "📷 <b>Пришлите картинку для анонса</b>\n\n"
-                    "Или отправьте команду:",
+                    "Или выберите действие:",
                     parse_mode='HTML',
-                    reply_markup=ReplyKeyboardMarkup([
-                        ["🗑️ Удалить картинку"],
-                        ["❌ Отмена"]
-                    ], one_time_keyboard=True, resize_keyboard=True)
+                    reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
                 )
                 return ASK_IMAGE
     # Если что-то другое — повторяем предпросмотр
@@ -2012,14 +2196,20 @@ def cleanup_old_gpx_files():
         logger.error(f"Ошибка при автоматической очистке: {e}")
 
 def cleanup_old_dashboards():
-    """Автоматически очищает дашборды старше 180 дней"""
+    """Автоматически очищает дашборды и постеры старше 180 дней"""
     try:
         try:
             tz = pytz.timezone(TIMEZONE)
         except pytz.exceptions.UnknownTimeZoneError:
             tz = pytz.UTC
         current_time = datetime.now(tz)
-        dashboard_files = glob.glob("dashboard_*.png")
+        dashboard_files = (
+            glob.glob("dashboard_*.png")
+            + glob.glob("poster_*.png")
+            + glob.glob(f"{CACHE_DIR}/dashboard_*.png")
+            + glob.glob(f"{CACHE_DIR}/poster_*.png")
+            + glob.glob(f"{CACHE_DIR}/poster_*_config.json")
+        )
         deleted_count = 0
 
         for file_path in dashboard_files:
@@ -2162,12 +2352,122 @@ def generate_weather_dashboard(gpx_path, start_datetime, output_path="weather_da
         ]
         
         print(f"🌤️ Вызываем внешний модуль: {' '.join(cmd)}")
-        
-        # Выполняем команду
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+
+        # Выполняем команду (таймаут — чтобы зависший процесс не заблокировал бота)
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd(), timeout=300)
         
         if result.returncode == 0:
             print(f"✅ Дашборд успешно создан: {cache_output_path}")
+            # Копируем файл из cache в корневую папку для совместимости
+            if os.path.exists(cache_output_path):
+                import shutil
+                shutil.copy2(cache_output_path, output_path)
+                return True
+            else:
+                print(f"❌ Файл не найден: {cache_output_path}")
+                return False
+        else:
+            print(f"❌ Ошибка выполнения внешнего модуля:")
+            print(f"STDOUT: {result.stdout}")
+            print(f"STDERR: {result.stderr}")
+            return False
+
+    except Exception as e:
+        print(f"❌ Ошибка при вызове внешнего модуля: {e}")
+        return False
+
+# Эмодзи и прочие символы, которых нет в шрифте постера (DejaVu Sans):
+# non-BMP (все современные эмодзи), misc symbols/dingbats, VS16, ZWJ
+UNRENDERABLE_PATTERN = re.compile(
+    '[{}-{}{}-{}{}-{}{}{}]'.format(
+        chr(0x10000), chr(0x10FFFF),  # всё выше BMP (основная масса эмодзи)
+        chr(0x2600), chr(0x27BF),     # misc symbols + dingbats
+        chr(0x2B00), chr(0x2BFF),     # misc symbols and arrows
+        chr(0xFE0F),                  # variation selector-16
+        chr(0x200D),                  # zero-width joiner
+    )
+)
+
+def strip_unrenderable(text):
+    """Убирает символы, которые matplotlib отрисует как '?' на постере."""
+    if not text:
+        return text
+    cleaned = UNRENDERABLE_PATTERN.sub('', str(text))
+    return re.sub(r' {2,}', ' ', cleaned).strip()
+
+def generate_ride_poster(gpx_path, user_data, output_path="ride_poster.png"):
+    """Генерирует постер заезда через внешний модуль ride_poster.py
+
+    Собирает config из данных анонса (название, дата, время, старт, темп,
+    длина, набор) и вызывает ride_poster.py как subprocess.
+    """
+    try:
+        cache_output_path = os.path.join(CACHE_DIR, output_path)
+
+        # Все текстовые поля задаём явно, чтобы не всплыли примеры из default_config()
+        config = {
+            'title': 'GROUP ROAD RIDE',
+            'subtitle': '',
+            'route_name': '',
+            'date': '—',
+            'time': '—',
+            'start_label': 'START',
+            'start': '—',
+            'notes': '',
+            'climb_names': ['Climb 1', 'Climb 2', 'Climb 3', 'Climb 4'],
+        }
+
+        dt = user_data.get('parsed_datetime')
+        if dt:
+            # Формат как в постере: "Sat 18 Apr 2026" (%a/%b в C-локали — английские)
+            config['date'] = dt.strftime('%a %d %b %Y')
+            config['time'] = dt.strftime('%H:%M')
+
+        route_name = user_data.get('route_name') or user_data.get('extracted_name')
+        if route_name:
+            config['subtitle'] = route_name
+            config['route_name'] = route_name
+
+        start_point = user_data.get('start_point_name')
+        if start_point:
+            config['start'] = start_point
+
+        pace = user_data.get('pace')
+        if pace in PACE_TO_POSTER:
+            config['pace'] = PACE_TO_POSTER[pace]
+
+        # Длина и набор из анонса (Komoot/GPX), чтобы цифры совпадали с текстом
+        if user_data.get('length_km') is not None:
+            config['distance_km'] = user_data['length_km']
+        if user_data.get('uphill') is not None:
+            config['elevation_m'] = user_data['uphill']
+
+        comment = user_data.get('comment')
+        if comment:
+            config['notes'] = comment
+
+        # Шрифт постера не умеет эмодзи — вычищаем их из пользовательского текста
+        for key in ('subtitle', 'route_name', 'start', 'notes'):
+            config[key] = strip_unrenderable(config[key])
+
+        config_stem = os.path.splitext(os.path.basename(output_path))[0]
+        config_path = os.path.join(CACHE_DIR, f"{config_stem}_config.json")
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False)
+
+        cmd = [
+            sys.executable, 'ride_poster.py',
+            '--gpx', gpx_path,
+            '--config', config_path,
+            '--out', cache_output_path,
+        ]
+
+        print(f"🖼️ Вызываем внешний модуль: {' '.join(cmd)}")
+
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd(), timeout=120)
+
+        if result.returncode == 0:
+            print(f"✅ Постер успешно создан: {cache_output_path}")
             # Копируем файл из cache в корневую папку для совместимости
             if os.path.exists(cache_output_path):
                 import shutil
@@ -2191,8 +2491,13 @@ async def clear_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         # Сначала очищаем старые файлы
         cleanup_old_gpx_files()
-        
-        cache_files = glob.glob(f"{CACHE_DIR}/*.gpx")
+
+        cache_files = (
+            glob.glob(f"{CACHE_DIR}/*.gpx")
+            + glob.glob(f"{CACHE_DIR}/dashboard_*.png")
+            + glob.glob(f"{CACHE_DIR}/poster_*.png")
+            + glob.glob(f"{CACHE_DIR}/poster_*_config.json")
+        )
         deleted_count = 0
         
         for file_path in cache_files:
