@@ -55,6 +55,20 @@ try:
 except ImportError:
     ctx = None
 
+DEFAULT_OSM_TILE_USER_AGENT = (
+    "gpx_weather_bot/1.0 (weather dashboard; contact: @gpx_weather_bot)"
+)
+
+
+def osm_tile_headers():
+    """Headers for OSM tiles: identifiable user-agent (required by tile usage policy)."""
+    ua = os.getenv("OSM_TILE_USER_AGENT", DEFAULT_OSM_TILE_USER_AGENT).strip()
+    if not ua:
+        ua = DEFAULT_OSM_TILE_USER_AGENT
+    # contextily merges {"user-agent": random_id, **headers}; lowercase overrides it.
+    return {"user-agent": ua}
+
+
 def get_timezone(preferred_tz_name=None):
     """Get timezone: preferred -> TIMEZONE -> TZ -> Europe/Belgrade."""
     tz_name = preferred_tz_name or os.getenv('TIMEZONE') or os.getenv('TZ', 'Europe/Belgrade')
@@ -743,8 +757,9 @@ def create_weather_dashboard(
                 ax_map,
                 source=ctx.providers.OpenStreetMap.Mapnik,
                 crs="EPSG:3857",
-                attribution=False,
+                attribution="© OpenStreetMap contributors",
                 zoom="auto",
+                headers=osm_tile_headers(),
             )
         except Exception as e:
             print(f"⚠️ Failed to load OSM basemap: {e}")
