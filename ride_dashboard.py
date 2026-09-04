@@ -481,9 +481,15 @@ def draw_tiles(fig, tiles: list[tuple[str, str, str, str, str]]) -> None:
             fig_fit_text(fig, tx, y + 0.002, sub, fontsize=fs(9.5), max_w=tw, max_lines=1, min_fontsize=fs(7), color=SUBTLE, va="bottom", zorder=8)
 
 
-def _mercator_arrays(route: rp.RouteData) -> tuple[np.ndarray, np.ndarray]:
-    pts = [wd.latlon_to_web_mercator(float(la), float(lo)) for la, lo in zip(route.lat, route.lon)]
-    return np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
+def _track_arrays(route: rp.RouteData) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(x, y, dist_km) in Web Mercator for the map: the raw GPX track when
+    available, so bridges, underpasses and U-turns look exactly as routed."""
+    if route.raw_lat is not None and route.raw_lon is not None and route.raw_dist_km is not None:
+        lat, lon, dist = route.raw_lat, route.raw_lon, route.raw_dist_km
+    else:
+        lat, lon, dist = route.lat, route.lon, route.dist_km
+    pts = [wd.latlon_to_web_mercator(float(la), float(lo)) for la, lo in zip(lat, lon)]
+    return np.array([p[0] for p in pts]), np.array([p[1] for p in pts]), np.asarray(dist)
 
 
 def draw_scale_bar(ax, lat_deg: float) -> None:
@@ -567,7 +573,7 @@ def _round_map_corners(fig, ax) -> None:
 def draw_map(fig, route: rp.RouteData, climbs, samples) -> None:
     L = LAYOUT
     ax = fig.add_axes([L["margin_x"], L["map_y"], L["panel_w"], L["map_h"]], zorder=3)
-    xs, ys = _mercator_arrays(route)
+    xs, ys, dist_km = _track_arrays(route)
     x_range = float(np.ptp(xs)) or 1.0
     y_range = float(np.ptp(ys)) or 1.0
 
@@ -600,10 +606,11 @@ def draw_map(fig, route: rp.RouteData, climbs, samples) -> None:
     # A few small direction markers along the route: a triangle rotated to the
     # local heading (over ~200 m) reads cleaner than a drawn arrow at map scale.
     n = len(xs)
+    total_km = float(dist_km[-1]) if len(dist_km) else 0.0
     n_arrows = 5
     for k in range(1, n_arrows + 1):
-        i = int(n * k / (n_arrows + 1))
-        j = min(n - 1, i + 2)
+        i = int(np.clip(np.searchsorted(dist_km, total_km * k / (n_arrows + 1)), 0, n - 1))
+        j = int(np.clip(np.searchsorted(dist_km, dist_km[i] + 0.2), 0, n - 1))
         if j <= i:
             continue
         angle = math.degrees(math.atan2(ys[j] - ys[i], xs[j] - xs[i]))
@@ -628,14 +635,15 @@ def draw_map(fig, route: rp.RouteData, climbs, samples) -> None:
     # as "5%+" on the profile), numbered by a callout circle beside the
     # segment: a badge sitting on the line used to hide the climb itself.
     for i, climb in enumerate(climbs, start=1):
-        s = rp.index_for_distance(route, climb.start_km)
-        e = rp.index_for_distance(route, climb.end_km)
+        s = int(np.clip(np.searchsorted(dist_km, climb.start_km), 0, n - 1))
+        e = int(np.clip(np.searchsorted(dist_km, climb.end_km), 0, n - 1))
         if e <= s:
             continue
         ax.plot(xs[s:e + 1], ys[s:e + 1], color=CARD, linewidth=lw(7.5), solid_capstyle="round", zorder=12)
         ax.plot(xs[s:e + 1], ys[s:e + 1], color=ACCENT, linewidth=lw(4.2), solid_capstyle="round", solid_joinstyle="round", zorder=13)
-        m = (s + e) // 2
-        j, k = min(len(xs) - 1, m + 2), max(0, m - 2)
+        m = int(np.clip(np.searchsorted(dist_km, (climb.start_km + climb.end_km) / 2.0), 0, n - 1))
+        j = int(np.clip(np.searchsorted(dist_km, dist_km[m] + 0.15), 0, n - 1))
+        k = int(np.clip(np.searchsorted(dist_km, dist_km[m] - 0.15), 0, n - 1))
         hx, hy = xs[j] - xs[k], ys[j] - ys[k]
         norm = math.hypot(hx, hy) or 1.0
         offset_pt = fs(20)
