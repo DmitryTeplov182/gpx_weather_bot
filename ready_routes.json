@@ -1,13 +1,6 @@
 {
   "ready_routes": [
     {
-      "name": "Fruška Lite CCW (from Flags)",
-      "komoot_link": "https://www.komoot.com/tour/2396106518",
-      "start_point": "Flags (Liman)",
-      "start_point_link": "https://maps.app.goo.gl/j95ME2cuzX8k9hnj7",
-      "comment": "Легкий горный маршрут по Фрушке."
-    },
-    {
       "name": "Bukovac (from Flags)",
       "komoot_link": "https://www.komoot.com/tour/2070100198",
       "start_point": "Flags (Liman)",
@@ -27,6 +20,20 @@
       "start_point": "Flags (Liman)",
       "start_point_link": "https://maps.app.goo.gl/j95ME2cuzX8k9hnj7",
       "comment": "Работа в подъем, без гонки."
+    },
+    {
+      "name": "Veliki trougao (from Železnički park)",
+      "komoot_link": "https://www.komoot.com/tour/3124484437",
+      "start_point": "Železnički park",
+      "start_point_link": "https://maps.app.goo.gl/hSZ9C4Xue5RVpMea8",
+      "comment": "Плоская петля через Бачки Петровац, ровный темп."
+    },
+    {
+      "name": "Rumenka - Futog - Jama (from Železnički park)",
+      "komoot_link": "https://www.komoot.com/tour/2526993761",
+      "start_point": "Železnički park",
+      "start_point_link": "https://maps.app.goo.gl/hSZ9C4Xue5RVpMea8",
+      "comment": "Плоский маршрут вдоль Дуная, без подъёмов."
     }
   ]
 }
