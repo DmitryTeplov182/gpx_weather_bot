@@ -138,6 +138,7 @@ def get_default_points():
         {'name': 'Železnička stanica Petrovaradin', 'link': 'https://maps.app.goo.gl/LiQuSUhWCGc9i1Mh9'},
         {'name': 'Bobar Petrol (Bulevar Evrope 120)', 'link': 'https://maps.app.goo.gl/RCn23pSWUyPcze8z9?g_st=ic'},
         {'name': 'Glavna pošta (21101)', 'link': 'https://maps.app.goo.gl/3GMZV5Ze65kDwYLH9'},
+        {'name': 'Pekara', 'link': 'https://maps.app.goo.gl/5odriFaKFhEiZnDQ7'},
     ]
     default_points.append(CUSTOM_POINT.copy())
     return default_points
