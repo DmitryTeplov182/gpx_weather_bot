@@ -164,7 +164,7 @@ def planned_speed(cfg: dict, route: rp.RouteData) -> tuple[float, float, str]:
         flat_kmh, w_per_kg = rp.PACE_MODEL[level]
         hours = rp.estimate_ride_hours(route, flat_kmh, w_per_kg)
         speed = total_km / hours if hours > 0 else flat_kmh
-        return speed, hours, f"avg {speed:.0f} km/h at pace {level:g}/3"
+        return speed, hours, f"at {speed:.0f} km/h"
     speed = float(cfg.get("speed_kmh") or DEFAULT_SPEED_KMH)
     if speed <= 0:
         speed = DEFAULT_SPEED_KMH
@@ -309,13 +309,12 @@ def fmt_range(lo: float, hi: float, unit: str) -> str:
 
 
 def _fmt_hours(hours: float) -> str:
-    if hours < 1:
-        return f"{int(round(hours * 60))} min"
-    h = int(hours)
-    m = int(round((hours - h) * 60))
-    if m == 60:
-        h, m = h + 1, 0
-    return f"{h} h {m:02d}" if m else f"{h} h"
+    """'1h 20m' / '45m'."""
+    total_min = int(round(hours * 60))
+    h, m = divmod(total_min, 60)
+    if h == 0:
+        return f"{m}m"
+    return f"{h}h {m:02d}m" if m else f"{h}h"
 
 
 def draw_pace_dots(fig, x_left: float, cy: float, pace: float, radius: float = 0.0105, gap: float = 0.030) -> float:
@@ -349,13 +348,13 @@ def draw_icon(fig, x: float, y: float, w: float, h: float, kind: str, color: str
     ax.set_aspect("equal")
     ax.axis("off")
     if kind == "route":
-        px = np.array([0.16, 0.34, 0.30, 0.58, 0.74, 0.84])
-        py = np.array([0.14, 0.28, 0.54, 0.58, 0.74, 0.88])
-        s = np.linspace(0.0, 1.0, len(px))
-        t = np.linspace(0.0, 1.0, 60)
-        ax.plot(np.interp(t, s, px), np.interp(t, s, py), color=color, linewidth=lw(3.4), linestyle=(0, (1.8, 1.1)), solid_capstyle="round")
+        # A winding road between two waypoints: solid line, smooth S-curve.
+        t = np.linspace(0.0, 1.0, 80)
+        px = 0.16 + 0.68 * t
+        py = 0.16 + 0.68 * t + 0.16 * np.sin(2.0 * math.pi * t)
+        ax.plot(px, py, color=color, linewidth=lw(3.2), solid_capstyle="round", solid_joinstyle="round")
         for cx, cy in ((px[0], py[0]), (px[-1], py[-1])):
-            ax.add_patch(Circle((cx, cy), 0.14, facecolor=color, edgecolor=CARD, linewidth=lw(1.6)))
+            ax.add_patch(Circle((cx, cy), 0.13, facecolor=CARD, edgecolor=color, linewidth=lw(2.4)))
     elif kind == "mountains":
         ax.add_patch(Polygon([(0.02, 0.18), (0.36, 0.62), (0.64, 0.18)], closed=True, facecolor=color, alpha=0.5, edgecolor="none"))
         ax.add_patch(Polygon([(0.34, 0.18), (0.70, 0.86), (1.0, 0.18)], closed=True, facecolor=color, edgecolor="none"))
@@ -442,7 +441,7 @@ def build_tiles(route: rp.RouteData, climbs, cfg: dict, samples, hours: float, s
         elevation_m = rp.total_gain_m(route.ele)
     climbs_note = f"{len(climbs)} main climb{'s' if len(climbs) != 1 else ''}" if climbs else "no major climbs"
     tiles = [
-        ("Distance", fmt_km(distance_km), f"about {_fmt_hours(hours)} {speed_note}", "route", PRIMARY),
+        ("Distance", fmt_km(distance_km), f"~{_fmt_hours(hours)} {speed_note}", "route", PRIMARY),
         ("Elevation", fmt_m(elevation_m), climbs_note, "mountains", SECONDARY),
     ]
     if samples:
@@ -500,8 +499,11 @@ def draw_scale_bar(ax, lat_deg: float) -> None:
     by = y0 + (y1 - y0) * 0.085
     bar_h = (y1 - y0) * 0.012
     pad_x = (x1 - x0) * 0.008
+    # The last label ("10 km") is centred on the bar end, so the backing box
+    # needs room to its right for half of it.
+    label_room = (x1 - x0) * 0.034
     ax.add_patch(FancyBboxPatch(
-        (bx - pad_x, by - (y1 - y0) * 0.02), length + 2 * pad_x, bar_h + (y1 - y0) * 0.075,
+        (bx - pad_x, by - (y1 - y0) * 0.02), length + 2 * pad_x + label_room, bar_h + (y1 - y0) * 0.075,
         boxstyle="round,pad=0", facecolor=CARD, edgecolor="none", alpha=0.85, zorder=20,
     ))
     ax.add_patch(Rectangle((bx, by), length / 2.0, bar_h, facecolor=INK, edgecolor=INK, linewidth=lw(0.8), zorder=21))
