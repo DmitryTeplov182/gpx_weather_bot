@@ -486,21 +486,8 @@ def draw_map(fig, route: rp.RouteData, climbs, samples) -> None:
             markerfacecolor=ACCENT, markeredgecolor=CARD, markeredgewidth=lw(1.2), zorder=9,
         )
 
-    # Small wind arrows at the forecast samples: the arrow points where the wind blows to.
-    for point, weather in samples:
-        if float(weather["wind_speed"]) <= 0:
-            continue
-        px, py = wd.latlon_to_web_mercator(point["lat"], point["lon"])
-        to_rad = math.radians((float(weather["wind_direction"]) + 180.0) % 360.0)
-        length_pt = fs(13)
-        dx, dy = length_pt * math.sin(to_rad), length_pt * math.cos(to_rad)
-        for color, width, scale, alpha in ((CARD, lw(3.0), fs(10.5), 0.95), (INK, lw(1.5), fs(8.5), 0.9)):
-            ax.annotate(
-                "", xy=(px + 0, py + 0), xycoords="data", xytext=(-dx, -dy), textcoords="offset points",
-                arrowprops=dict(arrowstyle="-|>", color=color, lw=width, mutation_scale=scale, alpha=alpha, shrinkA=0, shrinkB=0),
-                zorder=11,
-            )
-
+    # Wind on the map is summarised by the compass in the corner (draw_wind_compass);
+    # per-sample arrows along the route cluttered it and hid the climbs.
     marker_r = max(x_range, y_range) * 0.016
     sx, sy, fx, fy = xs[0], ys[0], xs[-1], ys[-1]
     if math.hypot(fx - sx, fy - sy) < max(x_range, y_range) * 0.06:
@@ -513,10 +500,28 @@ def draw_map(fig, route: rp.RouteData, climbs, samples) -> None:
         ax.add_patch(Circle((fx, fy), marker_r * 0.92, facecolor=ACCENT, edgecolor=CARD, linewidth=lw(2.2), zorder=15))
         ax.text(fx, fy, "F", ha="center", va="center", fontsize=fs(8.5), color=CARD, fontweight="bold", zorder=16)
 
+    # Climb segments in the accent colour on top of the route (the same colour
+    # as "5%+" on the profile), numbered by a callout circle beside the
+    # segment: a badge sitting on the line used to hide the climb itself.
     for i, climb in enumerate(climbs, start=1):
-        idx = rp.index_for_distance(route, (climb.start_km + climb.end_km) / 2.0)
-        ax.add_patch(Circle((xs[idx], ys[idx]), marker_r * 0.85, facecolor=CARD, edgecolor=PRIMARY, linewidth=lw(2.0), zorder=18))
-        ax.text(xs[idx], ys[idx], str(i), ha="center", va="center", fontsize=fs(8.5), color=PRIMARY, fontweight="bold", zorder=19)
+        s = rp.index_for_distance(route, climb.start_km)
+        e = rp.index_for_distance(route, climb.end_km)
+        if e <= s:
+            continue
+        ax.plot(xs[s:e + 1], ys[s:e + 1], color=CARD, linewidth=lw(7.5), solid_capstyle="round", zorder=12)
+        ax.plot(xs[s:e + 1], ys[s:e + 1], color=ACCENT, linewidth=lw(4.2), solid_capstyle="round", solid_joinstyle="round", zorder=13)
+        m = (s + e) // 2
+        j, k = min(len(xs) - 1, m + 2), max(0, m - 2)
+        hx, hy = xs[j] - xs[k], ys[j] - ys[k]
+        norm = math.hypot(hx, hy) or 1.0
+        offset_pt = fs(20)
+        ox, oy = -hy / norm * offset_pt, hx / norm * offset_pt   # perpendicular, left of travel
+        ax.annotate(
+            str(i), xy=(xs[m], ys[m]), xytext=(ox, oy), textcoords="offset points",
+            ha="center", va="center", fontsize=fs(8.5), color=ACCENT, fontweight="bold", zorder=19,
+            bbox=dict(boxstyle="circle,pad=0.32", facecolor=CARD, edgecolor=ACCENT, linewidth=lw(1.6)),
+            arrowprops=dict(arrowstyle="-", color=ACCENT, lw=lw(1.2), shrinkA=0, shrinkB=1),
+        )
 
     ax.set_facecolor(CARD)
     ax.set_xticks([])
@@ -525,10 +530,8 @@ def draw_map(fig, route: rp.RouteData, climbs, samples) -> None:
         spine.set_visible(False)
     ax.grid(False)
     handles = [plt.Line2D([0], [0], color=PRIMARY, linewidth=lw(3.5), label="Route")]
-    if samples:
-        handles.append(plt.Line2D([0], [0], color=INK, linewidth=lw(1.4), marker=">", markersize=fs(5), label="Wind"))
     if climbs:
-        handles.append(plt.Line2D([0], [0], color=PRIMARY, marker="o", markerfacecolor=CARD, markersize=fs(7), linewidth=0, label="Climb"))
+        handles.append(plt.Line2D([0], [0], color=ACCENT, linewidth=lw(3.5), label="Climb"))
     leg = ax.legend(handles=handles, loc="upper right", fontsize=fs(8), frameon=True, framealpha=1.0, facecolor=CARD, edgecolor=BORDER, labelcolor=INK)
     leg.set_zorder(20)
     if samples:
