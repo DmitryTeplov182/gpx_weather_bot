@@ -1,13 +1,6 @@
 {
   "ready_routes": [
     {
-      "name": "Fruška Lite CCW (from Flags)",
-      "komoot_link": "https://www.komoot.com/tour/2396106518",
-      "start_point": "Flags (Liman)",
-      "start_point_link": "https://maps.app.goo.gl/j95ME2cuzX8k9hnj7",
-      "comment": "Легкий горный маршрут по Фрушке."
-    },
-    {
       "name": "Bukovac (from Flags)",
       "komoot_link": "https://www.komoot.com/tour/2070100198",
       "start_point": "Flags (Liman)",
