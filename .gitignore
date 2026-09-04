@@ -84,3 +84,6 @@ weather_bot.db
 weather_bot/
 # OSM tile cache (contextily)
 cache/tiles/
+
+# Example renders referenced from README and PRs
+!docs/examples/*.png
