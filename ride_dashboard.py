@@ -372,6 +372,63 @@ def build_tiles(route: rp.RouteData, climbs, cfg: dict, samples, speed_kmh: floa
     return tiles
 
 
+COMPASS_POINTS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+
+def compass_label(deg: float) -> str:
+    return COMPASS_POINTS[int((deg + 11.25) // 22.5) % 16]
+
+
+def mean_wind(samples) -> tuple[float, float, float]:
+    """(mean speed km/h, mean direction the wind comes FROM, mean direction it blows TO).
+
+    Direction is the vector mean so opposite gusts cancel; speed is the plain
+    mean so the label still says how windy the ride is.
+    """
+    speeds = np.array([float(w["wind_speed"]) for _, w in samples])
+    dirs = np.radians([float(w["wind_direction"]) for _, w in samples])
+    u = -speeds * np.sin(dirs)   # x component of where the wind blows to
+    v = -speeds * np.cos(dirs)
+    to_deg = (math.degrees(math.atan2(float(u.mean()), float(v.mean()))) + 360.0) % 360.0
+    return float(speeds.mean()), (to_deg + 180.0) % 360.0, to_deg
+
+
+def draw_wind_compass(fig, ax, samples) -> None:
+    """Small compass in the top-left map corner: arrow shows where the average wind blows to."""
+    avg_speed, from_deg, to_deg = mean_wind(samples)
+    pos = ax.get_position()
+    fig_w, fig_h = fig.get_size_inches()
+    size_in = 0.95
+    w = size_in / (pos.width * fig_w)
+    h = size_in / (pos.height * fig_h)
+    x0, y0 = 0.012, 1.0 - h - 0.025
+    inset = ax.inset_axes([x0, y0, w, h], zorder=25)
+    inset.set_xlim(-1.25, 1.25)
+    inset.set_ylim(-1.25, 1.25)
+    inset.set_aspect("equal")
+    inset.axis("off")
+    inset.add_patch(Circle((0, 0), 1.2, facecolor=CARD, edgecolor=BORDER, linewidth=lw(1.0), alpha=0.97))
+    inset.add_patch(Circle((0, 0), 0.9, facecolor="none", edgecolor=BORDER, linewidth=lw(1.0)))
+    for letter, ang in (("N", 0), ("E", 90), ("S", 180), ("W", 270)):
+        a = math.radians(ang)
+        inset.text(
+            0.9 * math.sin(a), 0.9 * math.cos(a), letter, ha="center", va="center",
+            fontsize=fs(6.5), color=PRIMARY if letter == "N" else SUBTLE, fontweight="bold",
+            bbox=dict(boxstyle="circle,pad=0.18", facecolor=CARD, edgecolor="none"),
+        )
+    t = math.radians(to_deg)
+    dx, dy = math.sin(t), math.cos(t)
+    inset.annotate(
+        "", xy=(0.7 * dx, 0.7 * dy), xytext=(-0.7 * dx, -0.7 * dy),
+        arrowprops=dict(arrowstyle="-|>", color=INK, lw=lw(2.2), mutation_scale=fs(12), shrinkA=0, shrinkB=0),
+    )
+    ax.text(
+        x0 + 0.004, y0 - 0.03, f"Avg wind {avg_speed:.0f} km/h from {compass_label(from_deg)}",
+        transform=ax.transAxes, ha="left", va="top", fontsize=fs(7.5), color=INK, fontweight="bold", zorder=26,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor=CARD, edgecolor=BORDER, linewidth=lw(0.8)),
+    )
+
+
 def _mercator_arrays(route: rp.RouteData) -> tuple[np.ndarray, np.ndarray]:
     pts = [wd.latlon_to_web_mercator(float(la), float(lo)) for la, lo in zip(route.lat, route.lon)]
     return np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
@@ -474,6 +531,8 @@ def draw_map(fig, route: rp.RouteData, climbs, samples) -> None:
         handles.append(plt.Line2D([0], [0], color=PRIMARY, marker="o", markerfacecolor=CARD, markersize=fs(7), linewidth=0, label="Climb"))
     leg = ax.legend(handles=handles, loc="upper right", fontsize=fs(8), frameon=True, framealpha=1.0, facecolor=CARD, edgecolor=BORDER, labelcolor=INK)
     leg.set_zorder(20)
+    if samples:
+        draw_wind_compass(fig, ax, samples)
 
 
 def draw_climb_rows(ax, climbs, max_rows: int = 4) -> None:

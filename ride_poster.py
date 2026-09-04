@@ -833,6 +833,16 @@ def draw_profile(
     ax.grid(axis="x", color=BORDER, linewidth=lw(1.0))
     ax.grid(axis="y", color=BORDER, linewidth=lw(0.8), alpha=0.9)
 
+    # The axes fill the panel, so metre labels would hang outside its left
+    # edge: give up the width of the widest label (plus tick pad) instead.
+    r = _renderer(fig)
+    label_w_px = max((t.get_window_extent(renderer=r).width for t in ax.get_yticklabels()), default=0.0)
+    if label_w_px > 0:
+        pad_px = lw(3.0) * fig.dpi / 72.0 + 0.004 * fig.get_figwidth() * fig.dpi
+        shift = (label_w_px + pad_px) / (fig.get_figwidth() * fig.dpi)
+        pos = ax.get_position()
+        ax.set_position([pos.x0 + shift, pos.y0, max(0.05, pos.width - shift), pos.height])
+
     # Legend and the km unit share the footer band of the panel (figure coords),
     # below the tick labels, so they cannot collide with the chart itself.
     rx, ry, rw, rh = rect
