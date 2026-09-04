@@ -29,7 +29,7 @@ except ImportError:
     ctx = None
 
 DEFAULT_OSM_TILE_USER_AGENT = (
-    "gpx_weather_bot/1.0 (weather dashboard; contact: @gpx_weather_bot)"
+    "burekovoz_bot/1.0 (ride dashboard; contact: @burekovoz_bot)"
 )
 
 

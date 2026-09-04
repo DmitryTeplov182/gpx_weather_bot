@@ -68,7 +68,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 WIDTH_PX, HEIGHT_PX, DPI = 1600, 2200, 160
 DEFAULT_WATERMARK = "whatever"
-DEFAULT_ATTRIBUTION = "@gpx_weather_bot · OpenStreetMap · Open-Meteo"
+DEFAULT_ATTRIBUTION = "@burekovoz_bot · OpenStreetMap · Open-Meteo"
 WEATHER_SAMPLE_KM = 6.0
 WIND_BIN_MINUTES = 10
 TILE_CACHE_DIR = os.path.join("cache", "tiles")
@@ -534,7 +534,7 @@ def draw_footer(fig, cfg: dict) -> None:
     if watermark:
         fig.text(
             1.0 - L["margin_x"], L["footer_y"] + 0.004, watermark,
-            fontsize=fs(44), color=INK, alpha=0.08, ha="right", va="center", fontweight="bold", zorder=0.5,
+            fontsize=fs(44), color=INK, alpha=0.035, ha="right", va="center", fontweight="bold", zorder=0.5,
         )
 
 
