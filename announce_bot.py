@@ -431,7 +431,8 @@ async def handle_route_selection(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
     
     # Проверяем, что это выбор маршрута
-    if text.startswith(('1.', '2.', '3.', '4.', '5.')):
+    # Кнопка вида "6. Название": номер не ограничен пятью маршрутами
+    if re.match(r'^\d+\.', text):
         try:
             route_index = int(text.split('.')[0]) - 1
             logger.info(f"Выбран маршрут с индексом: {route_index}")

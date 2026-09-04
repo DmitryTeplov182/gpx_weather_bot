@@ -64,6 +64,9 @@ class RouteData:
     # smoothed profile used for climb detection.
     raw_ele: np.ndarray | None = None
     raw_dist_km: np.ndarray | None = None
+    # Raw track coordinates for drawing the map exactly as routed.
+    raw_lat: np.ndarray | None = None
+    raw_lon: np.ndarray | None = None
 
 
 @dataclass
@@ -129,7 +132,10 @@ def parse_gpx(gpx_path: Path) -> RouteData:
     ele = np.array([p[2] for p in pts], dtype=float)
     dist_km = cumulative_distance_km(lat, lon)
     gain_m = hysteresis_gain_m(ele)
-    raw = RouteData(lat=lat, lon=lon, ele=ele, dist_km=dist_km, gain_m=gain_m, raw_ele=ele, raw_dist_km=dist_km)
+    raw = RouteData(
+        lat=lat, lon=lon, ele=ele, dist_km=dist_km, gain_m=gain_m,
+        raw_ele=ele, raw_dist_km=dist_km, raw_lat=lat, raw_lon=lon,
+    )
     return resample_route(raw, step_m=100.0)
 
 
@@ -145,7 +151,7 @@ def resample_route(route: RouteData, step_m: float = 100.0) -> RouteData:
     ele = moving_average(ele, 7)
     return RouteData(
         lat=lat, lon=lon, ele=ele, dist_km=new_dist_m / 1000.0, gain_m=route.gain_m,
-        raw_ele=route.raw_ele, raw_dist_km=route.raw_dist_km,
+        raw_ele=route.raw_ele, raw_dist_km=route.raw_dist_km, raw_lat=route.raw_lat, raw_lon=route.raw_lon,
     )
 
 
