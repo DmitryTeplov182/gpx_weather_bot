@@ -173,8 +173,8 @@ PACE_OPTIONS = [
 
 # Маппинг лун на шкалу темпа дашборда (1.0–3.0)
 PACE_TO_POSTER = dict(zip(PACE_OPTIONS, [1.0, 1.5, 2.0, 2.5, 3.0]))
-# Средняя скорость для расчёта времени прохождения и прогноза, если задан только темп
-PACE_TO_SPEED = dict(zip(PACE_OPTIONS, [22, 24, 27, 30, 33]))
+# Скорость по умолчанию, если темп не задан. При лунах среднюю скорость считает
+# ride_dashboard по профилю маршрута (PACE_MODEL в ride_poster.py).
 DEFAULT_SPEED_KMH = 27
 SPEED_MIN_KMH, SPEED_MAX_KMH = 10, 60
 PACE_SKIP_BUTTON = '⏭️ Без темпа'
@@ -213,14 +213,11 @@ def format_speed_range(speed_range, unit='км/ч'):
 
 
 def planned_speed_kmh(user_data):
-    """Скорость для расчёта времени в пути: диапазон -> середина, луны -> таблица, иначе дефолт."""
+    """Явная скорость для дашборда: середина диапазона, иначе None (луны/дефолт считает рендерер)."""
     speed_range = user_data.get('speed_range')
     if speed_range:
         return (float(speed_range[0]) + float(speed_range[1])) / 2.0
-    pace = user_data.get('pace')
-    if pace in PACE_TO_SPEED:
-        return float(PACE_TO_SPEED[pace])
-    return float(DEFAULT_SPEED_KMH)
+    return None
 
 
 def pace_line(user_data):

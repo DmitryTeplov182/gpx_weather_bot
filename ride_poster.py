@@ -185,6 +185,44 @@ def max_grade_between(fine: tuple[np.ndarray, np.ndarray], start_km: float, end_
     return float(np.max(g[mask])) if mask.any() else None
 
 
+# Pace levels (moons, 1..3) as a flat-road speed and a climbing power-to-weight.
+# Two moons = 30 km/h on the flat and 3 W/kg uphill; the ride's average speed
+# then follows from the route profile instead of a fixed number, so a mountain
+# loop at the same pace averages much less than a flat one.
+PACE_MODEL: dict[float, tuple[float, float]] = {
+    1.0: (24.0, 2.0),
+    1.5: (27.0, 2.5),
+    2.0: (30.0, 3.0),
+    2.5: (33.0, 3.5),
+    3.0: (36.0, 4.0),
+}
+CLIMB_DRAG_TERM = 0.25      # rolling + air resistance at climbing speeds, in units of g
+DESCENT_FACTOR = 1.35       # descents relative to the flat speed
+MAX_DESCENT_KMH = 50.0
+UPHILL_GRADE = 0.01         # steeper than this counts as climbing
+DOWNHILL_GRADE = -0.02      # shallower than this counts as descending
+
+
+def estimate_ride_hours(route: RouteData, flat_kmh: float, w_per_kg: float) -> float:
+    """Moving time for the route at a pace level, summed over 100 m segments.
+
+    Climbing speed comes from power against gravity plus a drag term:
+    v = w / (g·grade + drag), capped at the flat speed. Descents run at a
+    fixed multiple of the flat speed. Stops and regroups are not included.
+    """
+    seg_km = np.diff(route.dist_km)
+    rise = np.diff(route.ele)
+    seg_m = seg_km * 1000.0
+    grade = np.zeros_like(seg_m)
+    ok = seg_m > 1.0
+    grade[ok] = rise[ok] / seg_m[ok]
+    speed = np.full_like(seg_m, float(flat_kmh))
+    up = grade > UPHILL_GRADE
+    speed[up] = np.clip(3.6 * w_per_kg / (9.81 * grade[up] + CLIMB_DRAG_TERM), 5.0, flat_kmh)
+    speed[grade < DOWNHILL_GRADE] = min(flat_kmh * DESCENT_FACTOR, MAX_DESCENT_KMH)
+    return float(np.sum(seg_km / speed))
+
+
 def total_gain_m(ele: np.ndarray) -> float:
     diff = np.diff(ele)
     return float(np.sum(diff[diff > 0.0]))
@@ -758,12 +796,14 @@ def draw_profile(
     route: RouteData,
     climbs: list[ClimbInfo],
     legend_at: str = "footer",
+    legend_anchor: tuple[float, float] | None = None,
 ) -> None:
     """Elevation profile inside a rounded panel.
 
     legend_at="footer" keeps the gradient legend in the panel footer (poster);
     "title" puts it on the title row and appends the km unit to the last tick,
     for short panels where the footer would collide with the tick labels.
+    legend_anchor=(x_right, y) right-aligns the title-row legend at that point.
     """
     d = route.dist_km
     e = moving_average(route.ele, 7)
@@ -847,17 +887,27 @@ def draw_profile(
     # below the tick labels, so they cannot collide with the chart itself.
     rx, ry, rw, rh = rect
     pos = ax.get_position()
-    if legend_at == "title":
+    if legend_at == "title" and legend_anchor is not None:
+        cx, legend_y = legend_anchor
+    elif legend_at == "title":
         legend_y = ry + rh - 0.0225
         cx = rx + 0.50 * rw
     else:
         legend_y = ry + 0.0135
         cx = pos.x0
+    start_x = cx
+    items = []
     for label, color in (("< 2.5%", MUTED), ("2.5–5%", SECONDARY), ("5%+", ACCENT)):
-        fig.text(cx, legend_y, "●", fontsize=fs(11), color=color, va="center", zorder=4)
+        items.append(fig.text(cx, legend_y, "●", fontsize=fs(11), color=color, va="center", zorder=4))
         cx += 0.013
         t = fig.text(cx, legend_y, label, fontsize=fs(9.5), color=SUBTLE, va="center", zorder=4)
+        items.append(t)
         cx += text_w_fig(fig, t) + 0.024
+    if legend_at == "title" and legend_anchor is not None:
+        # Drawn from the anchor leftwards: shift the block so it ends there.
+        block_w = cx - 0.024 - start_x
+        for item in items:
+            item.set_x(item.get_position()[0] - block_w)
     if legend_at != "title":
         fig.text(pos.x1, legend_y, "km", ha="right", va="center", fontsize=fs(10), color=SUBTLE, zorder=4)
 
