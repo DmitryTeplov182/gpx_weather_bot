@@ -82,3 +82,8 @@ weather_bot.db
 
 # Legacy standalone weather project directory
 weather_bot/
+# OSM tile cache (contextily)
+cache/tiles/
+
+# Example renders referenced from README and PRs
+!docs/examples/*.png

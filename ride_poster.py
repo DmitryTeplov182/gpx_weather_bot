@@ -59,6 +59,11 @@ class RouteData:
     # Total ascent computed from the raw GPX elevations before resampling and
     # smoothing flatten the profile; None when constructed from derived data.
     gain_m: float | None = None
+    # Raw (unsmoothed) elevation profile kept alongside the resampled one so
+    # max-grade figures can be measured on short windows instead of the heavily
+    # smoothed profile used for climb detection.
+    raw_ele: np.ndarray | None = None
+    raw_dist_km: np.ndarray | None = None
 
 
 @dataclass
@@ -124,7 +129,8 @@ def parse_gpx(gpx_path: Path) -> RouteData:
     ele = np.array([p[2] for p in pts], dtype=float)
     dist_km = cumulative_distance_km(lat, lon)
     gain_m = hysteresis_gain_m(ele)
-    return resample_route(RouteData(lat=lat, lon=lon, ele=ele, dist_km=dist_km, gain_m=gain_m), step_m=100.0)
+    raw = RouteData(lat=lat, lon=lon, ele=ele, dist_km=dist_km, gain_m=gain_m, raw_ele=ele, raw_dist_km=dist_km)
+    return resample_route(raw, step_m=100.0)
 
 
 def resample_route(route: RouteData, step_m: float = 100.0) -> RouteData:
@@ -137,7 +143,46 @@ def resample_route(route: RouteData, step_m: float = 100.0) -> RouteData:
     lon = np.interp(new_dist_m, old_dist_m, route.lon)
     ele = np.interp(new_dist_m, old_dist_m, route.ele)
     ele = moving_average(ele, 7)
-    return RouteData(lat=lat, lon=lon, ele=ele, dist_km=new_dist_m / 1000.0, gain_m=route.gain_m)
+    return RouteData(
+        lat=lat, lon=lon, ele=ele, dist_km=new_dist_m / 1000.0, gain_m=route.gain_m,
+        raw_ele=route.raw_ele, raw_dist_km=route.raw_dist_km,
+    )
+
+
+# Max grade is measured on a lightly smoothed 50 m profile over a 100 m window
+# (roughly what Komoot reports), not on the kilometre-scale smoothing used for
+# climb detection, which understated Rakovac (13% on Komoot) as 9%.
+FINE_GRADE_STEP_M = 50.0
+FINE_GRADE_WINDOW_M = 100.0
+FINE_GRADE_SMOOTH_PTS = 3
+
+
+def fine_grade_profile(route: RouteData) -> tuple[np.ndarray, np.ndarray]:
+    """Return (dist_km, grade_percent) on a fine grid from the raw elevations."""
+    if route.raw_ele is not None and route.raw_dist_km is not None and len(route.raw_ele) >= 3:
+        src_ele, src_dist = route.raw_ele, route.raw_dist_km
+    else:
+        src_ele, src_dist = route.ele, route.dist_km
+    total_m = float(src_dist[-1] * 1000.0)
+    if total_m <= FINE_GRADE_STEP_M * 2:
+        return src_dist, np.zeros(len(src_dist))
+    d_m = np.arange(0.0, total_m + FINE_GRADE_STEP_M, FINE_GRADE_STEP_M)
+    ele = moving_average(np.interp(d_m, src_dist * 1000.0, src_ele), FINE_GRADE_SMOOTH_PTS)
+    grades = np.zeros(len(d_m))
+    half = FINE_GRADE_WINDOW_M / 2.0
+    for i in range(len(d_m)):
+        s = int(np.searchsorted(d_m, d_m[i] - half, side="left"))
+        e = min(len(d_m) - 1, int(np.searchsorted(d_m, d_m[i] + half, side="right") - 1))
+        dd = d_m[e] - d_m[s]
+        if dd > 10.0:
+            grades[i] = 100.0 * (ele[e] - ele[s]) / dd
+    return d_m / 1000.0, grades
+
+
+def max_grade_between(fine: tuple[np.ndarray, np.ndarray], start_km: float, end_km: float) -> float | None:
+    d, g = fine
+    mask = (d >= start_km) & (d <= end_km)
+    return float(np.max(g[mask])) if mask.any() else None
 
 
 def total_gain_m(ele: np.ndarray) -> float:
@@ -252,6 +297,14 @@ def detect_major_climbs(route: RouteData, names: Iterable[str] | None = None) ->
     major.sort(key=lambda c: (c.gain_m * c.avg_grade, c.length_km), reverse=True)
     major = major[:4]
     major.sort(key=lambda c: c.start_km)
+
+    # Climb bounds come from the smoothed profile; the steepest 100 m inside
+    # them is measured on the fine profile.
+    fine = fine_grade_profile(route)
+    for climb in major:
+        fine_max = max_grade_between(fine, climb.start_km, climb.end_km)
+        if fine_max is not None:
+            climb.max_grade = max(climb.max_grade, fine_max)
 
     name_list = list(names or [])
     for i, climb in enumerate(major, start=1):
@@ -691,7 +744,27 @@ def nice_tick_step(total_km: float, max_ticks: int = 9) -> float:
     return float(max(1.0, round(total_km / max_ticks)))
 
 
-def draw_profile(fig, ax: plt.Axes, rect: tuple[float, float, float, float], route: RouteData, climbs: list[ClimbInfo]) -> None:
+def nice_elevation_step(range_m: float, max_ticks: int = 5) -> float:
+    for step in (10, 20, 25, 50, 100, 200, 250, 500, 1000):
+        if range_m / step <= max_ticks:
+            return float(step)
+    return float(max(10.0, round(range_m / max_ticks / 100.0) * 100.0))
+
+
+def draw_profile(
+    fig,
+    ax: plt.Axes,
+    rect: tuple[float, float, float, float],
+    route: RouteData,
+    climbs: list[ClimbInfo],
+    legend_at: str = "footer",
+) -> None:
+    """Elevation profile inside a rounded panel.
+
+    legend_at="footer" keeps the gradient legend in the panel footer (poster);
+    "title" puts it on the title row and appends the km unit to the last tick,
+    for short panels where the footer would collide with the tick labels.
+    """
     d = route.dist_km
     e = moving_average(route.ele, 7)
     grades = np.clip(grade_percent(RouteData(route.lat, route.lon, e, d), 250.0), 0.0, None)
@@ -743,25 +816,40 @@ def draw_profile(fig, ax: plt.Axes, rect: tuple[float, float, float, float], rou
     ticks = np.arange(0.0, total + step * 0.25, step)
     ticks = ticks[ticks <= total + 1e-9]
     ax.set_xticks(ticks)
-    ax.set_xticklabels([f"{t:g}" for t in ticks], fontsize=fs(10), color=SUBTLE)
-    ax.set_yticks([])
+    tick_labels = [f"{t:g}" for t in ticks]
+    if legend_at == "title" and tick_labels:
+        tick_labels[-1] += " km"
+    ax.set_xticklabels(tick_labels, fontsize=fs(10), color=SUBTLE)
+    # Elevation ticks stay inside [min, max] so they never land in the badge
+    # headroom above the profile.
+    y_step = nice_elevation_step(max_e - min_e)
+    y_ticks = np.arange(math.ceil(min_e / y_step) * y_step, max_e + 1e-9, y_step)
+    ax.set_yticks(y_ticks)
+    ax.set_yticklabels([f"{t:.0f} m" for t in y_ticks], fontsize=fs(9), color=SUBTLE)
     ax.tick_params(axis="x", length=0, pad=lw(4.0))
+    ax.tick_params(axis="y", length=0, pad=lw(3.0))
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.grid(axis="x", color=BORDER, linewidth=lw(1.0))
+    ax.grid(axis="y", color=BORDER, linewidth=lw(0.8), alpha=0.9)
 
     # Legend and the km unit share the footer band of the panel (figure coords),
     # below the tick labels, so they cannot collide with the chart itself.
     rx, ry, rw, rh = rect
     pos = ax.get_position()
-    footer_y = ry + 0.0135
-    cx = pos.x0
+    if legend_at == "title":
+        legend_y = ry + rh - 0.0225
+        cx = rx + 0.50 * rw
+    else:
+        legend_y = ry + 0.0135
+        cx = pos.x0
     for label, color in (("< 2.5%", MUTED), ("2.5–5%", SECONDARY), ("5%+", ACCENT)):
-        fig.text(cx, footer_y, "●", fontsize=fs(11), color=color, va="center", zorder=4)
+        fig.text(cx, legend_y, "●", fontsize=fs(11), color=color, va="center", zorder=4)
         cx += 0.013
-        t = fig.text(cx, footer_y, label, fontsize=fs(9.5), color=SUBTLE, va="center", zorder=4)
+        t = fig.text(cx, legend_y, label, fontsize=fs(9.5), color=SUBTLE, va="center", zorder=4)
         cx += text_w_fig(fig, t) + 0.024
-    fig.text(pos.x1, footer_y, "km", ha="right", va="center", fontsize=fs(10), color=SUBTLE, zorder=4)
+    if legend_at != "title":
+        fig.text(pos.x1, legend_y, "km", ha="right", va="center", fontsize=fs(10), color=SUBTLE, zorder=4)
 
 
 def draw_climb_list(ax: plt.Axes, climbs: list[ClimbInfo]) -> None:
