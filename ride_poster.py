@@ -782,8 +782,10 @@ def nice_tick_step(total_km: float, max_ticks: int = 9) -> float:
     return float(max(1.0, round(total_km / max_ticks)))
 
 
-def nice_elevation_step(range_m: float, max_ticks: int = 5) -> float:
-    for step in (10, 20, 25, 50, 100, 200, 250, 500, 1000):
+def nice_elevation_step(range_m: float, max_ticks: int = 4) -> float:
+    # Small steps matter on flat routes, where the whole profile spans ~10 m
+    # and a 10 m step would leave a single tick.
+    for step in (2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000):
         if range_m / step <= max_ticks:
             return float(step)
     return float(max(10.0, round(range_m / max_ticks / 100.0) * 100.0))
