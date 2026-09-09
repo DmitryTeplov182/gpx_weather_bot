@@ -6,6 +6,7 @@ import subprocess
 import requests
 from telegram import (
     Update,
+    InputMediaPhoto,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
@@ -184,6 +185,17 @@ SPEED_RANGE_PATTERN = re.compile(
     r'^\s*(\d{1,2}(?:[.,]\d)?)\s*(?:[-–—]\s*(\d{1,2}(?:[.,]\d)?))?\s*(?:км/ч|km/h|kmh)?\s*$',
     re.IGNORECASE,
 )
+# RSVP через опрос Telegram: при пересылке опрос остаётся тем же объектом,
+# поэтому голоса общие для всех чатов, куда его переслали.
+# Начиная с Bot API 9.6 у опроса есть форматируемое описание, а с 10.0 —
+# картинка в описании, так что весь анонс живёт внутри одного сообщения-опроса.
+RSVP_POLL_QUESTION = '🚴 Едешь?'
+RSVP_POLL_OPTIONS = ['✅ Еду', '🤔 Может быть', '❌ Не в этот раз']
+# Опрос без описания приходится подписывать вручную (запасной путь, см. ниже)
+RSVP_HINT = 'Отмечайтесь в опросе ниже 👇'
+# Описание опроса ограничено так же, как подпись к фото
+POLL_DESCRIPTION_LIMIT = 1024
+
 PACE_PROMPT = 'Выбери ожидаемый темп (луны), напиши среднюю скорость (например 25-28) или пропусти:'
 
 
@@ -1759,6 +1771,45 @@ async def send_announce_with_media(update: Update, context: ContextTypes.DEFAULT
             disable_web_page_preview=True
         )
 
+async def send_rsvp_poll(update: Update, description=None, media=None) -> None:
+    """Публичный опрос-отметка. Описание и картинка делают его самим анонсом."""
+    await update.message.reply_poll(
+        question=RSVP_POLL_QUESTION,
+        options=RSVP_POLL_OPTIONS,
+        description=description,
+        description_parse_mode='HTML' if description else None,
+        media=media,
+        is_anonymous=False,          # видно поимённо, кто едет
+        allows_multiple_answers=False,
+        allows_revoting=True,        # можно передумать и переголосовать
+        allow_adding_options=False,  # свои варианты не добавляют
+    )
+
+
+async def send_announce_as_poll(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                announce: str) -> None:
+    """Публикует анонс. Обычно это одно сообщение-опрос: картинка и текст живут
+    в описании опроса, отметки — в нём же, поэтому пересылать нужно ровно одно
+    сообщение, и голоса остаются общими для всех чатов.
+    Слишком длинный анонс в описание не влезает — тогда шлём его отдельно."""
+    announce_image = context.user_data.get('announce_image')
+    dashboard_path = current_dashboard_path(context)
+
+    if utf16_len(announce) > POLL_DESCRIPTION_LIMIT:
+        await send_announce_with_media(update, context, announce + '\n\n' + RSVP_HINT)
+        await send_rsvp_poll(update)
+        return
+
+    if announce_image:
+        await send_rsvp_poll(update, description=announce,
+                             media=InputMediaPhoto(announce_image))
+    elif dashboard_path:
+        with open(dashboard_path, 'rb') as photo:
+            await send_rsvp_poll(update, description=announce,
+                                 media=InputMediaPhoto(photo))
+    else:
+        await send_rsvp_poll(update, description=announce)
+
 def build_announce_text(user_data) -> tuple:
     """Собирает текст анонса. Возвращает (text, None) или (None, error_html)."""
     date_time_str = user_data.get('date_time', '-')
@@ -1808,9 +1859,7 @@ def build_announce_text(user_data) -> tuple:
 
     announce_lines.extend([
         "",
-        comment,
-        "",
-        "Ставьте реакцию если собираетесь поехать"
+        comment
     ])
     return "\n".join(announce_lines), None
 
@@ -1857,7 +1906,7 @@ async def preview_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_announce_with_media(
         update, context, announce,
         reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True),
-        confirm_text='Всё верно?'
+        confirm_text='🗳️ Отметки «Едешь?» добавятся опросом прямо в это сообщение.\n\nВсё верно?'
     )
     return PREVIEW_STEP
 
@@ -1872,8 +1921,8 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gpx_path = context.user_data.get('gpx_path')
         no_track = context.user_data.get('no_track', False)
 
-        # Отправляем анонс с картинкой/дашбордом или текстом
-        await send_announce_with_media(update, context, announce)
+        # Анонс уходит одним сообщением-опросом (или двумя, если текст длинный)
+        await send_announce_as_poll(update, context, announce)
 
         # Отправляем GPX файл только если есть трек
         if gpx_path and not no_track:
@@ -1883,6 +1932,8 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Отправляем финальное сообщение
         await update.message.reply_text(
             "✅ <b>Анонс создан, можешь переслать его друзьям.</b>\n\n"
+            "🗳️ <b>Отметки — опросом внутри самого анонса.</b> При пересылке это тот же "
+            "опрос, так что голоса общие для всех чатов, куда он попал.\n\n"
             "🚴‍♂️ <b>Хорошей покатушки!</b>\n\n"
             "Используй /start для создания нового анонса.",
             parse_mode='HTML',
