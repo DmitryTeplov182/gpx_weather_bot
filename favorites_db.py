@@ -43,6 +43,29 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_favorite_routes_user_id ON favorite_routes(user_id)"
         )
+        _migrate_route_source_columns(conn)
+
+
+# Колонки источника появились вместе с поддержкой RideWithGPS: по ним видно,
+# из какого сервиса взят трек и какой его версии соответствует сохранённый блоб.
+ROUTE_SOURCE_COLUMNS = {
+    "provider": "TEXT",
+    "source_id": "TEXT",
+    "remote_updated_at": "TEXT",
+    "etag": "TEXT",
+}
+
+
+def _migrate_route_source_columns(conn: sqlite3.Connection) -> None:
+    existing = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(favorite_routes)").fetchall()
+    }
+    for column, column_type in ROUTE_SOURCE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE favorite_routes ADD COLUMN {column} {column_type}"
+            )
 
 
 def _ensure_user(conn: sqlite3.Connection, telegram_user_id: int) -> int:
@@ -75,16 +98,22 @@ def create_favorite(
     gpx_blob: bytes,
     gpx_filename: str | None,
     timezone: str | None,
+    provider: str | None = None,
+    source_id: str | None = None,
+    remote_updated_at: str | None = None,
+    etag: str | None = None,
 ) -> None:
     with get_connection() as conn:
         user_id = _ensure_user(conn, telegram_user_id)
         conn.execute(
             """
             INSERT INTO favorite_routes (
-                user_id, name, source_type, komoot_url, gpx_blob, gpx_filename, timezone
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                user_id, name, source_type, komoot_url, gpx_blob, gpx_filename, timezone,
+                provider, source_id, remote_updated_at, etag
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, name, source_type, komoot_url, gpx_blob, gpx_filename, timezone),
+            (user_id, name, source_type, komoot_url, gpx_blob, gpx_filename, timezone,
+             provider, source_id, remote_updated_at, etag),
         )
 
 
@@ -108,13 +137,34 @@ def get_favorite_by_id(telegram_user_id: int, favorite_id: int) -> sqlite3.Row |
         user_id = _ensure_user(conn, telegram_user_id)
         row = conn.execute(
             """
-            SELECT id, name, source_type, komoot_url, gpx_blob, gpx_filename, timezone, times_used
+            SELECT id, name, source_type, komoot_url, gpx_blob, gpx_filename, timezone,
+                   times_used, provider, source_id, remote_updated_at, etag
             FROM favorite_routes
             WHERE user_id = ? AND id = ?
             """,
             (user_id, favorite_id),
         ).fetchone()
         return row
+
+
+def update_favorite_track(
+    favorite_id: int,
+    gpx_blob: bytes,
+    remote_updated_at: str | None,
+    etag: str | None,
+    timezone: str | None = None,
+) -> None:
+    """Обновляет сохранённый трек избранного, когда маршрут изменился у провайдера."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE favorite_routes
+            SET gpx_blob = ?, remote_updated_at = ?, etag = ?,
+                timezone = COALESCE(?, timezone), updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (gpx_blob, remote_updated_at, etag, timezone, favorite_id),
+        )
 
 
 def mark_favorite_used(favorite_id: int) -> None:
