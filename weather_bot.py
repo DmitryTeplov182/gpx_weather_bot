@@ -1,5 +1,4 @@
 import asyncio
-import glob
 import logging
 import os
 import re
@@ -21,6 +20,14 @@ from telegram.ext import (
     filters,
 )
 
+import route_cache
+from route_sources import (
+    RouteError,
+    describe_change,
+    describe_stale,
+    ensure_route,
+    parse_route_link,
+)
 from weather_dashboard import detect_timezone_from_gpx, get_timezone
 from favorites_db import (
     count_favorites,
@@ -31,6 +38,7 @@ from favorites_db import (
     list_favorites,
     mark_favorite_used,
     rename_favorite,
+    update_favorite_track,
 )
 
 load_dotenv()
@@ -41,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ASK_KOMOOT_LINK, ASK_DATE, ASK_TIME, ASK_SPEED, ASK_FAVORITE_NAME, SELECT_FAVORITE, ASK_RENAME_FAVORITE = range(7)
+ASK_ROUTE_LINK, ASK_DATE, ASK_TIME, ASK_SPEED, ASK_FAVORITE_NAME, SELECT_FAVORITE, ASK_RENAME_FAVORITE = range(7)
 RESTART_BUTTON = "Restart"
 FAVORITES_BUTTON = "⭐ Favorites"
 SAVE_FAVORITE_BUTTON = "⭐ Save to Favorites"
@@ -59,10 +67,10 @@ FAVORITE_NAME_PATTERN = re.compile(
 TELEGRAM_TOKEN = os.getenv("WEATHER_TELEGRAM_TOKEN") or os.getenv(
     "TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN"
 )
-KOMOOT_LINK_PATTERN = re.compile(r"(https?://)?(www\.)?komoot\.[^/]+/tour/(\d+)")
-
-CACHE_DIR = "cache"
+CACHE_DIR = route_cache.CACHE_DIR
 os.makedirs(CACHE_DIR, exist_ok=True)
+# Сколько дней держать в кэше маршрут, к которому никто не обращался
+CACHE_KEEP_DAYS = 180
 MAX_GPX_SIZE_BYTES = 5 * 1024 * 1024  # 5MB
 
 
@@ -90,16 +98,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(
         "🌤️ <b>Hi! I am a weather bot</b>\n\n"
-        "Send a public Komoot route link\n"
+        "Send a public Komoot or RideWithGPS route link\n"
         "or upload a GPX route file.\n"
         "I will generate a weather dashboard.",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
-    return ASK_KOMOOT_LINK
+    return ASK_ROUTE_LINK
 
 
-async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_route_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if text == RESTART_BUTTON:
         return await start(update, context)
@@ -111,7 +119,7 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "No generated route to save yet. Build a dashboard first.",
                 reply_markup=main_keyboard(),
             )
-            return ASK_KOMOOT_LINK
+            return ASK_ROUTE_LINK
         await update.message.reply_text(
             "Send favorite name (1-64 chars):",
             reply_markup=main_keyboard(include_save=True),
@@ -125,12 +133,12 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if document.file_size and document.file_size > MAX_GPX_SIZE_BYTES:
             await update.message.reply_text("❌ File is too large. Maximum size is 5MB.")
-            return ASK_KOMOOT_LINK
+            return ASK_ROUTE_LINK
 
         allowed_mimes = {"application/gpx+xml", "application/octet-stream", "text/xml"}
         if not filename.endswith(".gpx") and mime_type not in allowed_mimes:
             await update.message.reply_text("❌ Please upload a GPX file (.gpx).")
-            return ASK_KOMOOT_LINK
+            return ASK_ROUTE_LINK
 
         safe_name = f"uploaded_{int(time.time())}_{uuid.uuid4().hex[:8]}.gpx"
         gpx_path = os.path.join(CACHE_DIR, safe_name)
@@ -140,7 +148,7 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error("Failed to download GPX file: %s", e, exc_info=True)
             await update.message.reply_text("❌ Failed to download GPX file.")
-            return ASK_KOMOOT_LINK
+            return ASK_ROUTE_LINK
 
         # GPX content validation
         try:
@@ -154,16 +162,17 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not has_points:
                 os.remove(gpx_path)
                 await update.message.reply_text("❌ GPX file contains no route points.")
-                return ASK_KOMOOT_LINK
+                return ASK_ROUTE_LINK
         except Exception:
             if os.path.exists(gpx_path):
                 os.remove(gpx_path)
             await update.message.reply_text("❌ File is corrupted or not a valid GPX.")
-            return ASK_KOMOOT_LINK
+            return ASK_ROUTE_LINK
 
         context.user_data["gpx_path"] = gpx_path
         context.user_data["tour_id"] = f"upload_{uuid.uuid4().hex[:8]}"
-        context.user_data["komoot_link"] = None
+        context.user_data["route_ref"] = None
+        context.user_data["route_link"] = None
         context.user_data["source_type"] = "gpx_upload"
         context.user_data["gpx_filename"] = os.path.basename(gpx_path)
 
@@ -186,18 +195,21 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    match = KOMOOT_LINK_PATTERN.search(text)
-    if not match:
+    ref = parse_route_link(text)
+    if not ref:
         await update.message.reply_text(
             "❌ Invalid link format.\n"
-            "Example: <code>https://www.komoot.com/tour/123456789</code>",
+            "Examples:\n"
+            "<code>https://www.komoot.com/tour/123456789</code>\n"
+            "<code>https://ridewithgps.com/routes/123456789</code>",
             parse_mode="HTML",
         )
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
-    context.user_data["komoot_link"] = text
-    context.user_data["tour_id"] = match.group(3)
-    context.user_data["source_type"] = "komoot"
+    context.user_data["route_ref"] = ref
+    context.user_data["route_link"] = ref.url
+    context.user_data["tour_id"] = f"{ref.cache_provider}-{ref.route_id}"
+    context.user_data["source_type"] = ref.provider
     context.user_data["gpx_filename"] = None
 
     dates = [
@@ -213,11 +225,56 @@ async def ask_komoot_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ASK_DATE
 
 
+async def refresh_favorite_if_changed(update: Update, favorite) -> bytes:
+    """Возвращает трек избранного, подтянув свежую версию, если она появилась.
+
+    Избранное хранит снимок GPX. Раньше он жил вечно: правка маршрута в
+    Komoot/RideWithGPS до избранного не доходила никак. Теперь по сохранённым
+    provider/source_id маршрут ревалидируется, и при изменении снимок
+    переписывается — с явным сообщением пользователю, а не молча.
+    """
+    stored = favorite["gpx_blob"]
+    provider = favorite["provider"] if "provider" in favorite.keys() else None
+    source_id = favorite["source_id"] if "source_id" in favorite.keys() else None
+    if not provider or not source_id:
+        return stored
+
+    ref = parse_route_link(favorite["komoot_url"] or "")
+    if not ref:
+        return stored
+
+    try:
+        route = await asyncio.to_thread(ensure_route, ref, CACHE_DIR)
+    except Exception as e:
+        logger.warning("Could not revalidate favorite %s: %s", favorite["id"], e)
+        return stored
+
+    meta = route_cache.read_meta(ref.cache_provider, ref.route_id, CACHE_DIR) or {}
+    if str(meta.get("remote_updated_at")) == str(favorite["remote_updated_at"]):
+        return stored
+
+    try:
+        with open(route.gpx_path, "rb") as f:
+            fresh = f.read()
+    except OSError as e:
+        logger.warning("Could not read refreshed track for favorite: %s", e)
+        return stored
+
+    update_favorite_track(
+        favorite["id"], fresh, meta.get("remote_updated_at"), meta.get("etag")
+    )
+    await update.message.reply_text(
+        f"🔄 Route changed at {ref.service_name} since you saved it — "
+        f"favorite '{favorite['name']}' updated."
+    )
+    return fresh
+
+
 async def show_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         await update.message.reply_text("Unable to identify user.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     favorites = list_favorites(user.id)
     if not favorites:
@@ -225,7 +282,7 @@ async def show_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Favorites list is empty.",
             reply_markup=main_keyboard(include_save=bool(context.user_data.get("can_save_favorite"))),
         )
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     context.user_data["favorite_id_map"] = {}
     keyboard = []
@@ -253,7 +310,7 @@ async def handle_favorite_selection(update: Update, context: ContextTypes.DEFAUL
             "Cancelled.",
             reply_markup=main_keyboard(include_save=bool(context.user_data.get("can_save_favorite"))),
         )
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
     if text == DELETE_FAVORITE_BUTTON:
         context.user_data["favorite_manage_action"] = "delete"
         await update.message.reply_text("Send favorite number to delete.")
@@ -274,12 +331,12 @@ async def handle_favorite_selection(update: Update, context: ContextTypes.DEFAUL
     user = update.effective_user
     if not user:
         await update.message.reply_text("Unable to identify user.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     favorite = get_favorite_by_id(user.id, favorite_id)
     if not favorite:
         await update.message.reply_text("Favorite route not found.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     manage_action = context.user_data.get("favorite_manage_action")
     if manage_action == "delete":
@@ -299,14 +356,19 @@ async def handle_favorite_selection(update: Update, context: ContextTypes.DEFAUL
         )
         return ASK_RENAME_FAVORITE
 
+    # Избранное — снимок трека на момент сохранения. Если у него есть источник,
+    # проверяем, не изменился ли маршрут с тех пор, и обновляем снимок.
+    gpx_blob = await refresh_favorite_if_changed(update, favorite)
+
     safe_name = f"favorite_{favorite_id}_{uuid.uuid4().hex[:8]}.gpx"
     gpx_path = os.path.join(CACHE_DIR, safe_name)
     with open(gpx_path, "wb") as f:
-        f.write(favorite["gpx_blob"])
+        f.write(gpx_blob)
 
     context.user_data["gpx_path"] = gpx_path
     context.user_data["tour_id"] = f"favorite_{favorite_id}_{uuid.uuid4().hex[:8]}"
-    context.user_data["komoot_link"] = favorite["komoot_url"]
+    context.user_data["route_ref"] = None
+    context.user_data["route_link"] = favorite["komoot_url"]
     context.user_data["source_type"] = favorite["source_type"]
     context.user_data["gpx_filename"] = favorite["gpx_filename"] or safe_name
     context.user_data["can_save_favorite"] = False
@@ -346,7 +408,7 @@ async def ask_rename_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE
     favorite_id = context.user_data.get("favorite_rename_id")
     if not user or not favorite_id:
         await update.message.reply_text("Rename context is missing.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     try:
         rename_favorite(user.id, int(favorite_id), text)
@@ -356,7 +418,7 @@ async def ask_rename_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE
             return ASK_RENAME_FAVORITE
         logger.error("Failed to rename favorite: %s", exc, exc_info=True)
         await update.message.reply_text("Failed to rename favorite.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     context.user_data.pop("favorite_rename_id", None)
     context.user_data.pop("favorite_rename_old_name", None)
@@ -373,7 +435,7 @@ async def ask_favorite_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Cancelled.",
             reply_markup=main_keyboard(include_save=True),
         )
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     if not (1 <= len(text) <= 64):
         await update.message.reply_text("Name must be between 1 and 64 chars.")
@@ -387,7 +449,7 @@ async def ask_favorite_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         await update.message.reply_text("Unable to identify user.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     total = count_favorites(user.id)
     if total >= MAX_FAVORITES_PER_USER:
@@ -395,30 +457,41 @@ async def ask_favorite_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"You reached the favorites limit ({MAX_FAVORITES_PER_USER}).",
             reply_markup=main_keyboard(include_save=True),
         )
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     gpx_path = context.user_data.get("gpx_path")
     if not gpx_path or not os.path.exists(gpx_path):
         await update.message.reply_text("Route GPX is not available.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     gpx_size = os.path.getsize(gpx_path)
     if gpx_size > MAX_GPX_SIZE_BYTES:
         await update.message.reply_text("Route GPX is too large to store.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     with open(gpx_path, "rb") as f:
         gpx_blob = f.read()
+
+    # Ключи свежести из сайдкара: по ним видно, какой версии маршрута
+    # соответствует сохранённый блоб, если позже понадобится его обновить.
+    ref = context.user_data.get("route_ref")
+    cached_meta = {}
+    if ref:
+        cached_meta = route_cache.read_meta(ref.cache_provider, ref.route_id, CACHE_DIR) or {}
 
     try:
         create_favorite(
             telegram_user_id=user.id,
             name=text,
             source_type=context.user_data.get("source_type", "komoot"),
-            komoot_url=context.user_data.get("komoot_link"),
+            komoot_url=context.user_data.get("route_link"),
             gpx_blob=gpx_blob,
             gpx_filename=context.user_data.get("gpx_filename"),
             timezone=context.user_data.get("route_timezone"),
+            provider=ref.provider if ref else None,
+            source_id=ref.route_id if ref else None,
+            remote_updated_at=cached_meta.get("remote_updated_at"),
+            etag=cached_meta.get("etag"),
         )
     except Exception as exc:
         if "UNIQUE constraint failed" in str(exc):
@@ -426,13 +499,13 @@ async def ask_favorite_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ASK_FAVORITE_NAME
         logger.error("Failed to save favorite: %s", exc, exc_info=True)
         await update.message.reply_text("Failed to save favorite.")
-        return ASK_KOMOOT_LINK
+        return ASK_ROUTE_LINK
 
     await update.message.reply_text(
         f"✅ Saved to favorites: {text}",
         reply_markup=main_keyboard(include_save=True),
     )
-    return ASK_KOMOOT_LINK
+    return ASK_ROUTE_LINK
 
 
 async def ask_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -569,32 +642,25 @@ async def process_gpx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     speed = context.user_data["speed"]
     gpx_path = context.user_data.get("gpx_path")
     if not gpx_path:
-        process = await asyncio.create_subprocess_exec(
-            "komootgpx",
-            "-d",
-            tour_id,
-            "-o",
-            CACHE_DIR,
-            "-e",
-            "-n",
-        )
-
+        ref = context.user_data.get("route_ref")
+        if not ref:
+            await update.message.reply_text("❌ No route to build the dashboard from.")
+            return ConversationHandler.END
         try:
-            await asyncio.wait_for(process.communicate(), timeout=60.0)
-        except asyncio.TimeoutError:
-            process.kill()
-            await update.message.reply_text("❌ GPX download timeout.")
+            route = await asyncio.to_thread(ensure_route, ref, CACHE_DIR)
+        except RouteError as e:
+            await update.message.reply_text(f"❌ {e}")
+            return ConversationHandler.END
+        except Exception as e:
+            logger.error("Failed to load route: %s", e, exc_info=True)
+            await update.message.reply_text(f"❌ Failed to load route: {e}")
             return ConversationHandler.END
 
-        if process.returncode != 0:
-            await update.message.reply_text("❌ Failed to download Komoot route.")
-            return ConversationHandler.END
+        for note in (describe_change(route), describe_stale(route)):
+            if note:
+                await update.message.reply_text(note)
 
-        gpx_files = glob.glob(f"{CACHE_DIR}/*-{tour_id}.gpx")
-        if not gpx_files:
-            await update.message.reply_text("❌ GPX was not found after download.")
-            return ConversationHandler.END
-        gpx_path = gpx_files[0]
+        gpx_path = route.gpx_path
         context.user_data["gpx_path"] = gpx_path
     elif not os.path.exists(gpx_path):
         await update.message.reply_text("❌ Uploaded GPX file was not found.")
@@ -662,12 +728,12 @@ async def show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["can_save_favorite"] = True
     await update.message.reply_text(
         "🌤️ <b>Ready for another route?</b>\n\n"
-        "Send a public Komoot link, upload a GPX file, choose Favorites,\n"
+        "Send a public Komoot or RideWithGPS link, upload a GPX file, choose Favorites,\n"
         "or save this route to Favorites.",
         parse_mode="HTML",
         reply_markup=main_keyboard(include_save=True),
     )
-    return ASK_KOMOOT_LINK
+    return ASK_ROUTE_LINK
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -677,7 +743,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - show help\n"
         "/cancel - cancel current flow\n\n"
         "You can send:\n"
-        "• public Komoot route link\n"
+        "• public Komoot or RideWithGPS route link\n"
         "• GPX file (up to 5MB)\n"
         "• use ⭐ Favorites for quick route selection"
     )
@@ -689,12 +755,26 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+def cleanup_cache():
+    """Вытесняет маршруты, к которым давно не обращались, и треки старого формата."""
+    try:
+        removed = route_cache.purge_legacy(CACHE_DIR)
+        if removed:
+            logger.info("Removed legacy cached tracks: %s", removed)
+        evicted = route_cache.purge_unused(CACHE_KEEP_DAYS, CACHE_DIR)
+        if evicted:
+            logger.info("Evicted unused cached routes: %s", evicted)
+    except Exception as e:
+        logger.error("Cache cleanup failed: %s", e)
+
+
 def main():
     if TELEGRAM_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         print("❌ Error: set WEATHER_TELEGRAM_TOKEN (or TELEGRAM_TOKEN) in env")
         return
 
     init_db()
+    cleanup_cache()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
@@ -702,7 +782,7 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ASK_KOMOOT_LINK: [MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, ask_komoot_link)],
+            ASK_ROUTE_LINK: [MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, ask_route_link)],
             ASK_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_date)],
             ASK_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_time)],
             ASK_SPEED: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_speed)],
