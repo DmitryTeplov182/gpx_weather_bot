@@ -1755,7 +1755,7 @@ async def send_announce_with_media(update: Update, context: ContextTypes.DEFAULT
         )
 
 def rsvp_poll_question(user_data) -> str:
-    """Заголовок опроса: «Название - дата время - едешь?»."""
+    """Заголовок опроса: «день недели время - маршрут»."""
     if user_data.get('no_track'):
         name = user_data.get('manual_route_description') or user_data.get('route_name') or 'Заезд'
     else:
@@ -1764,18 +1764,19 @@ def rsvp_poll_question(user_data) -> str:
 
     dt, _err = parse_date_time(user_data.get('date_time') or '', user_data.get('route_timezone'))
     if dt:
-        when = f"{dt.strftime('%d.%m')} {dt.strftime('%H:%M')}"
-        tail = f" - {when} - едешь?"
+        when = f"{RU_WEEKDAYS[dt.weekday()]} {dt.strftime('%H:%M')}"
     else:
-        raw = re.sub(r'\s+', ' ', str(user_data.get('date_time') or '')).strip()
-        tail = f" - {raw} - едешь?" if raw and raw != '-' else " - едешь?"
+        when = re.sub(r'\s+', ' ', str(user_data.get('date_time') or '')).strip()
+        if when == '-':
+            when = ''
+    prefix = f"{when} - " if when else ''
 
-    if len(name) + len(tail) > POLL_QUESTION_LIMIT:
-        keep = POLL_QUESTION_LIMIT - len(tail) - 1
+    if len(prefix) + len(name) > POLL_QUESTION_LIMIT:
+        keep = POLL_QUESTION_LIMIT - len(prefix) - 1
         if keep < 1:
-            return (name + tail)[:POLL_QUESTION_LIMIT]
+            return (prefix + name)[:POLL_QUESTION_LIMIT]
         name = name[:keep].rstrip() + '…'
-    return name + tail
+    return prefix + name
 
 
 async def send_rsvp_poll(update: Update, description=None, media=None, question=None) -> None:
