@@ -130,7 +130,7 @@ docker compose down
 
 - `TELEGRAM_TOKEN` — токен бота анонсов;
 - `TIMEZONE` — таймзона (например `Europe/Belgrade`);
-- `DASHBOARD_WATERMARK` — текст вотермарки на дашборде (по умолчанию `whatever`);
+- `DASHBOARD_WATERMARK` — необязательный текст вотермарки на дашборде (по умолчанию пусто);
 - `OSM_TILE_USER_AGENT` — User-Agent для тайлов OSM (см. `.env_weather.example`).
 
 `/path/to/project/.env_weather`

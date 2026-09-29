@@ -72,7 +72,7 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 WIDTH_PX, HEIGHT_PX, DPI = 1600, 2200, 160
-DEFAULT_WATERMARK = "whatever"
+DEFAULT_WATERMARK = ""
 DEFAULT_ATTRIBUTION = "@burekovoz_bot by whatevercc.rs · Data from: OpenStreetMap and Open-Meteo"
 DEFAULT_SPEED_KMH = 27.0
 WEATHER_SAMPLE_KM = 6.0

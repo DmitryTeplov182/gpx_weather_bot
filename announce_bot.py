@@ -64,7 +64,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_KEEP_DAYS = 180
 
 # Текст вотермарки на дашборде (название клуба)
-DASHBOARD_WATERMARK = os.getenv('DASHBOARD_WATERMARK', 'whatever')
+DASHBOARD_WATERMARK = os.getenv('DASHBOARD_WATERMARK', '')
 DASHBOARD_BUTTON = '🖼️ Дашборд заезда'
 # Все кнопки, по которым (пере)строится дашборд
 DASHBOARD_GENERATE_BUTTONS = (DASHBOARD_BUTTON, '🖼️ Сгенерировать дашборд', '🔄 Обновить дашборд')
