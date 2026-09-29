@@ -210,6 +210,8 @@ SPEED_RANGE_PATTERN = re.compile(
 # картинка в описании, так что весь анонс живёт внутри одного сообщения-опроса.
 RSVP_POLL_QUESTION = '🚴 Едешь?'
 RSVP_POLL_OPTIONS = ['✅ Еду', '🤔 Может быть', '❌ Не в этот раз']
+# Вопрос опроса в Bot API — до 300 символов
+POLL_QUESTION_LIMIT = 300
 # Опрос без описания приходится подписывать вручную (запасной путь, см. ниже)
 RSVP_HINT = 'Отмечайтесь в опросе ниже 👇'
 # Описание опроса ограничено так же, как подпись к фото
@@ -1752,10 +1754,34 @@ async def send_announce_with_media(update: Update, context: ContextTypes.DEFAULT
             disable_web_page_preview=True
         )
 
-async def send_rsvp_poll(update: Update, description=None, media=None) -> None:
+def rsvp_poll_question(user_data) -> str:
+    """Заголовок опроса: «Название - дата время - едешь?»."""
+    if user_data.get('no_track'):
+        name = user_data.get('manual_route_description') or user_data.get('route_name') or 'Заезд'
+    else:
+        name = user_data.get('route_name') or user_data.get('extracted_name') or 'Заезд'
+    name = re.sub(r'\s+', ' ', str(name)).strip() or 'Заезд'
+
+    dt, _err = parse_date_time(user_data.get('date_time') or '', user_data.get('route_timezone'))
+    if dt:
+        when = f"{dt.strftime('%d.%m')} {dt.strftime('%H:%M')}"
+        tail = f" - {when} - едешь?"
+    else:
+        raw = re.sub(r'\s+', ' ', str(user_data.get('date_time') or '')).strip()
+        tail = f" - {raw} - едешь?" if raw and raw != '-' else " - едешь?"
+
+    if len(name) + len(tail) > POLL_QUESTION_LIMIT:
+        keep = POLL_QUESTION_LIMIT - len(tail) - 1
+        if keep < 1:
+            return (name + tail)[:POLL_QUESTION_LIMIT]
+        name = name[:keep].rstrip() + '…'
+    return name + tail
+
+
+async def send_rsvp_poll(update: Update, description=None, media=None, question=None) -> None:
     """Публичный опрос-отметка. Описание и картинка делают его самим анонсом."""
     await update.message.reply_poll(
-        question=RSVP_POLL_QUESTION,
+        question=question or RSVP_POLL_QUESTION,
         options=RSVP_POLL_OPTIONS,
         description=description,
         description_parse_mode='HTML' if description else None,
@@ -1775,21 +1801,22 @@ async def send_announce_as_poll(update: Update, context: ContextTypes.DEFAULT_TY
     Слишком длинный анонс в описание не влезает — тогда шлём его отдельно."""
     announce_image = context.user_data.get('announce_image')
     dashboard_path = current_dashboard_path(context)
+    question = rsvp_poll_question(context.user_data)
 
     if utf16_len(announce) > POLL_DESCRIPTION_LIMIT:
         await send_announce_with_media(update, context, announce + '\n\n' + RSVP_HINT)
-        await send_rsvp_poll(update)
+        await send_rsvp_poll(update, question=question)
         return
 
     if announce_image:
         await send_rsvp_poll(update, description=announce,
-                             media=InputMediaPhoto(announce_image))
+                             media=InputMediaPhoto(announce_image), question=question)
     elif dashboard_path:
         with open(dashboard_path, 'rb') as photo:
             await send_rsvp_poll(update, description=announce,
-                                 media=InputMediaPhoto(photo))
+                                 media=InputMediaPhoto(photo), question=question)
     else:
-        await send_rsvp_poll(update, description=announce)
+        await send_rsvp_poll(update, description=announce, question=question)
 
 def build_announce_text(user_data) -> tuple:
     """Собирает текст анонса. Возвращает (text, None) или (None, error_html)."""
